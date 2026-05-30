@@ -1,0 +1,55 @@
+run:
+  timeout: 5m
+  issues-exit-code: 1
+  tests: false
+  skip-dirs:
+    - vendor/
+
+linters:
+  enable:
+    - gosec
+    - staticcheck
+    - errcheck
+    - govet
+    - gosimple
+    - unused
+    - ineffassign
+    - revive
+  disable:
+    - typecheck
+
+linters-settings:
+  gosec:
+    severity: medium
+    confidence: low
+    excludes:
+      - G204  # Subprocess launched with variable — false positives in template loader
+      - G304  # File path provided as tainted parameter — nuclei loader uses user input
+  staticcheck:
+    checks:
+      - all
+      - -SA1019
+  revive:
+    ignore-generated-header: true
+    severity: warning
+    rules:
+      - name: exported
+        severity: warning
+      - name: blank-imports
+      - name: unused-parameter
+        severity: warning
+
+issues:
+  exclude-use-default: false
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+        - unused
+    - path: internal/infrastructure/authscan/
+      linters:
+        - gosec
+    - path: detection/
+      linters:
+        - gosec

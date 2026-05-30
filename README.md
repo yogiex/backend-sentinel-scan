@@ -2,7 +2,7 @@
 
 > A high-performance vulnerability scanning engine powered by Nuclei templates, with credential vault and on-demand PDF reporting.
 
-[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Overview
@@ -44,7 +44,7 @@ SentinelScan Backend is a DAST (Dynamic Application Security Testing) engine tha
 
 | Component | Technology |
 |-----------|------------|
-| **Language** | Go 1.26+ |
+| **Language** | Go 1.21+ |
 | **HTTP Router** | gorilla/mux |
 | **WebSocket** | gorilla/websocket |
 | **Configuration** | spf13/viper |
@@ -146,7 +146,8 @@ ReportGenerator.GeneratePDF()
     ↓
 PDF cached to ./reports/scan_{id}.pdf
     ↓
-Response → { status: "ready", download_url: "/api/scans/{id}/report/download" }
+    Response → { status: "ready", download_url: "/api/scans/{id}/report/download" }
+```
 
 ## Quick Start
 
@@ -494,80 +495,80 @@ GET /api/templates/{id}
 ```
 backend-golang/
 ├── main.go                       # Application entry point
-├── cmd/migrate/main.go           # Migration CLI
 │
 ├── api/                          # HTTP & WebSocket transport
-│   ├── handlers.go               # Scan/auth/report handlers
-│   ├── auth_credential_handlers.go  # Credential vault CRUD
-│   ├── report_handlers.go        # Report data & PDF export
-│   ├── routes.go                 # Route definitions
-│   ├── websocket.go              # WebSocket streaming
-│   └── handlers_test.go          # Handler tests
+│   ├── handlers.go               # Core scan/template handlers
+│   ├── handlers_extended.go      # Credential vault CRUD, report handlers
+│   ├── router.go                 # Route definitions (single source of truth)
+│   ├── handlers_test.go          # Handler tests
+│   └── handlers_extended_test.go # Extended handler tests
 │
 ├── config/                       # Configuration
 │   └── config.go                 # Viper loader (YAML + env)
 │
-├── deployments/                  # Docker & env configs
-│   ├── development/
-│   ├── staging/
-│   └── production/
+├── db/                           # Database models & connection
+│   ├── models.go
+│   └── connection.go
 │
 ├── detection/                    # Detection engine
-│   ├── engine.go                 # Nuclei-based detection
 │   └── fingerprint.go            # Version fingerprinting
 │
-├── docs/                         # API docs & feature plans
-│   ├── docs.go                   # Swagger annotations
-│   ├── swagger.json / .yaml
+├── docs/                         # Documentation
+│   ├── architecture.md
+│   ├── api.md
+│   ├── testing.md
+│   ├── deployment.md
 │   └── features/                 # Feature development plans
 │
-├── internal/                     # DDD internal packages
-│   ├── domain/
-│   │   ├── entity/               # ScanJob, Finding, AuthCredential,
-│   │   │                         # AuthSession, ScanReport, Ticket, User
-│   │   └── repository/           # Repository interfaces + tests
-│   ├── application/
-│   │   ├── scan_service.go       # Scan lifecycle
-│   │   ├── auth_service.go       # User auth
-│   │   ├── auth_credential_service.go  # Credential vault
-│   │   ├── report_service.go     # Report data aggregation
-│   │   └── ticket_service.go     # Remediation tickets
-│   └── infrastructure/
-│       ├── auth/                 # JWT + bcrypt
-│       ├── authscan/             # Auth executors + session manager
-│       │   ├── executor.go       # Factory pattern
-│       │   ├── login_form.go     # Login form auth
-│       │   ├── cookie_auth.go    # Cookie replay auth
-│       │   ├── bearer_auth.go    # Bearer token auth
-│       │   ├── apikey_auth.go    # API key auth
-│       │   └── session_manager.go  # Session health checker
-│       ├── database/postgres/    # GORM repositories + models
-│       ├── event/                # In-memory event bus
-│       ├── messaging/           # RabbitMQ pub/sub
-│       ├── report/              # PDF + HTML template generator
-│       │   ├── generator.go     # Orchestrates HTML→PDF
-│       │   ├── template.go      # html/template + FuncMap
-│       │   ├── pdf.go           # chromedp Page.printToPDF
-│       │   └── templates/       # Embed.FS HTML templates
-│       ├── scanner/             # HTTP + Headless engines
-│       ├── template/            # Template caching
-│       └── worker/              # Pool + autoscaler
+├── event/                        # In-memory event bus (pub/sub)
+│   └── bus.go
 │
-├── migrations/                   # SQL migrations (001–007)
+├── internal/
+│   ├── domain/
+│   │   ├── entity/               # AuthCredential, AuthSession, ScanReportData, User, Ticket
+│   │   └── repository/           # Repository interfaces (Scan, Finding, Ticket, User, etc.)
+│   ├── application/
+│   │   └── application.go         # Stub services (ScanService, AuthService, ReportService, etc.)
+│   └── infrastructure/
+│       ├── auth/                 # JWT + bcrypt (test-only)
+│       ├── authscan/             # Session manager, credential executors (stub)
+│       ├── database/postgres/    # GORM repositories (stub)
+│       ├── event/                # Infrastructure event bus
+│       ├── messaging/            # RabbitMQ pub/sub (stub)
+│       ├── report/               # PDF report generator (stub)
+│       ├── scanner/              # HTTP + headless engines (stub)
+│       └── worker/               # Pool + autoscaler
+│
 ├── orchestrator/                 # Scan job coordination
-├── pkg/errors/                   # Custom error types
+├── pkg/errors/                   # Custom error types (AppError)
 ├── template/                     # Nuclei template types + loader
-├── test/                         # Integration & benchmark tests
-│   ├── integration/              # 2 files — migrator e2e, scan e2e (build tag: integration)
-│   └── benchmarks/               # 4 files — loader, engine, config, finding (Go benchmarks)
-├── PLAN.md                       # Milestone plan
-├── ARCHITECTURE.md               # Architecture overview
+├── worker/                       # Task/Result types
+├── test/                         # Integration, benchmark & E2E tests
+│   ├── integration/              # Build tag: integration
+│   ├── benchmarks/               # Go benchmarks
+│   └── e2e/                      # Build tag: e2e
+│       ├── testutil/             # Shared test helpers (NewTestServer, MustGET, etc.)
+│       ├── health/
+│       ├── scans/
+│       ├── credentials/
+│       ├── templates/
+│       ├── reports/
+│       └── auth/                 # Pending — routes not yet registered
+├── docs/                         # All documentation
+│   ├── agents.md                 # Agent instructions
+│   ├── prd.md                    # Product requirements
+│   ├── srs.md                    # Software requirements spec
+│   ├── architecture.md
+│   ├── api.md
+│   ├── testing.md
+│   ├── deployment.md
+│   └── features/
 └── README.md                     # This file
 ```
 
 ## Test Coverage
 
-**Status: ✅ All 23 packages pass `go test ./...` and `go vet ./...`**
+**Status: ✅ All non-main packages compile. `go vet ./...` passes on non-test-only packages.**
 
 | Package | Tests | Status |
 |---------|-------|--------|
@@ -583,10 +584,10 @@ backend-golang/
 | `internal/infrastructure/scanner` | 🟡 Moderate | ~25% |
 | `api` | 🟡 Moderate | ~45% |
 | `orchestrator` | 🟡 Growing | ~30% |
-| `internal/infrastructure/database` | 🟡 Moderate | ~30% |
+| `test/e2e` | 🟢 14 tests | All passing |
 | Remaining packages | 🟡 Various | 20–50% |
 
-~275 test functions · 10 benchmarks · ~60 test files · 5 dispatch loop tests
+~290 test functions · 10 benchmarks · ~65 test files · 5 dispatch loop tests
 
 ### Running Tests
 
@@ -604,7 +605,13 @@ go tool cover -html=coverage.out -o coverage.html
 # Run specific package tests
 go test -count=1 -v ./internal/application/...
 
-# Run integration tests (requires external services)
+# Run E2E tests (standalone, no external services required)
+go test -tags=e2e -count=1 ./test/e2e/...
+
+# Run E2E tests per domain
+go test -tags=e2e -count=1 -v ./test/e2e/scans/...
+
+# Run integration tests (requires PostgreSQL + RabbitMQ)
 go test -tags=integration -count=1 ./test/integration/...
 
 # Run benchmarks

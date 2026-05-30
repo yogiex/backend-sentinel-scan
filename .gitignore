@@ -1,0 +1,49 @@
+# Binary
+vulnscanner
+vulnscanner.exe
+*.exe
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Dependencies
+/vendor/
+
+# Coverage
+coverage.out
+coverage.html
+*.coverprofile
+
+# Build
+/tmp/
+/dist/
+
+# Reports
+/reports/
+/*.pdf
+
+# Templates (local clone)
+/templates/
+
+# Logs
+*.log
+
+# Temp files from tests
+/test-templates/

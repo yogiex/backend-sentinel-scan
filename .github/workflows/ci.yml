@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  lint-sast:
+    name: Lint & SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - run: go mod download
+
+      - name: golangci-lint (gosec + staticcheck)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Secret scan — gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sca:
+    name: Dependency CVE scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - run: go mod download
+
+      - name: OSV-Scanner — scan go.mod for CVEs
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            -r
+            --skip-git=true
+            ./go.mod
+
+  test:
+    name: Unit & E2E tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - run: go mod download
+
+      - name: Build check (non-main packages)
+        run: go build ./api/... ./config/... ./event/... ./template/... ./worker/... ./pkg/errors/... ./detection/... ./internal/... ./orchestrator/...
+
+      - name: go vet (production packages)
+        run: go vet ./config/... ./event/... ./template/... ./worker/... ./pkg/errors/... ./detection/...
+
+      - name: E2E tests
+        run: go test -tags=e2e -count=1 -v ./test/e2e/...
