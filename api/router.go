@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/event"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
 )
 
 func NewRouter(h *Handler, eventBus *event.Bus) http.Handler {

@@ -1,9 +1,6 @@
 package detector
 
-import (
-	"regexp"
-	"strings"
-)
+import "regexp"
 
 type DBMS string
 
@@ -229,17 +226,3 @@ func formatFloat(f float64) string {
 	return s
 }
 
-func matchPatterns(body string, matcher MatcherConfig, payload string) MatchResult {
-	for _, pattern := range matcher.Patterns {
-		if strings.Contains(strings.ToLower(body), strings.ToLower(pattern)) {
-			return MatchResult{
-				Matched:  true,
-				Type:     MatcherErrorBased,
-				Pattern:  pattern,
-				Evidence: extractEvidence(body, pattern, 100),
-				Payload:  payload,
-			}
-		}
-	}
-	return MatchResult{Matched: false}
-}

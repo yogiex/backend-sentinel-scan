@@ -335,20 +335,4 @@ func TestFormatFloat(t *testing.T) {
 	}
 }
 
-func TestMatchPatterns(t *testing.T) {
-	result := matchPatterns("error: SQL syntax", MatcherConfig{
-		Patterns: []string{"SQL syntax"},
-	}, "payload")
-	if !result.Matched {
-		t.Fatal("expected pattern match")
-	}
-}
 
-func TestMatchPatternsNotFound(t *testing.T) {
-	result := matchPatterns("clean response", MatcherConfig{
-		Patterns: []string{"SQL syntax"},
-	}, "payload")
-	if result.Matched {
-		t.Fatal("expected no pattern match")
-	}
-}
