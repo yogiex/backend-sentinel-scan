@@ -1,0 +1,40 @@
+metadata:
+  id: "sql-injection-error"
+  name: "SQL Injection (Error-Based)"
+  description: "Detects SQL injection by triggering database error messages"
+  severity: "critical"
+  tags: ["sql", "injection", "database"]
+
+engine: "http"
+method: "GET"
+path: "/?id=FUZZ"
+
+headers:
+  User-Agent: "SentinelScan-Detector/1.0"
+
+payloads:
+  - name: "single-quote"
+    value: "'"
+  - name: "double-quote"
+    value: '"'
+  - name: "or-1=1"
+    value: "' OR '1'='1"
+  - name: "or-1=1-double"
+    value: '" OR "1"="1'
+  - name: "union-select"
+    value: "' UNION SELECT NULL--"
+
+matchers:
+  - type: "keyword"
+    patterns:
+      - "you have an error in your sql"
+      - "warning: mysql"
+      - "unclosed quotation mark"
+      - "odbc driver"
+      - "sqlite_error"
+      - "ora-[0-9]{5}"
+      - "postgresql.*error"
+      - "division by zero"
+      - "unknown column"
+    location: "body"
+    condition: "or"

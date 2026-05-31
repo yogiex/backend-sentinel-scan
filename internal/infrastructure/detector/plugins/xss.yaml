@@ -1,0 +1,33 @@
+metadata:
+  id: "xss-reflected"
+  name: "Cross-Site Scripting (Reflected)"
+  description: "Detects reflected XSS by injecting script payloads"
+  severity: "high"
+  tags: ["xss", "injection", "script"]
+
+engine: "http"
+method: "GET"
+path: "/?q=FUZZ&search=FUZZ&s=FUZZ"
+
+payloads:
+  - name: "basic-script"
+    value: "<script>alert('xss')</script>"
+  - name: "img-onerror"
+    value: "<img src=x onerror=alert('xss')>"
+  - name: "svg-onload"
+    value: "<svg onload=alert('xss')>"
+  - name: "body-onload"
+    value: "<body onload=alert('xss')>"
+  - name: "iframe-src"
+    value: "<iframe src=javascript:alert('xss')>"
+
+matchers:
+  - type: "keyword"
+    patterns:
+      - "<script>alert('xss')</script>"
+      - "<img src=x onerror=alert"
+      - "<svg onload=alert"
+      - "<body onload=alert"
+      - "<iframe src=javascript:alert"
+    location: "body"
+    condition: "or"

@@ -1,0 +1,32 @@
+metadata:
+  id: "sql-injection-boolean"
+  name: "SQL Injection (Boolean Blind)"
+  description: "Detects blind SQL injection by comparing responses of true/false conditions"
+  severity: "critical"
+  tags: ["sql", "injection", "blind", "boolean"]
+
+engine: "http"
+method: "GET"
+path: "/?id=FUZZ"
+
+baseline:
+  method: "GET"
+  path: "/?id=1"
+
+payloads:
+  - name: "true-condition"
+    value: "1 AND 1=1"
+  - name: "false-condition"
+    value: "1 AND 1=2"
+  - name: "or-true"
+    value: "1 OR 1=1"
+  - name: "and-true"
+    value: "1 AND '1'='1"
+  - name: "or-true-string"
+    value: "1' OR '1'='1"
+
+matchers:
+  - type: "boolean"
+    comparison: "length"
+    threshold: 10
+    condition: "or"
