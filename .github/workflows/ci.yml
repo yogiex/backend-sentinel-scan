@@ -45,7 +45,7 @@ jobs:
       - run: go mod download
 
       - name: OSV-Scanner — scan go.mod for CVEs
-        uses: google/osv-scanner-action@v1
+        uses: google/osv-scanner/actions/scanner@v1
         with:
           scan-args: |-
             -r
