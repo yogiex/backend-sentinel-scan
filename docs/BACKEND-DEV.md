@@ -18,10 +18,16 @@ endpoint login, error format JSON yang belum ada, dan path
 | Kredensial | AES-256-GCM at rest, `config` tidak pernah dikembalikan ke klien |
 | Password | bcrypt cost 12, timing uniform untuk user tidak dikenal |
 | Rate/limit | body 1 MiB, target ≤ 50, pagination ≤ 100/halaman |
+| Mesin scanning | tiap task menjalankan **satu** plugin dari registry embedded (9 plugin); temuan disimpan lewat `CreateBatch` |
+| Guard jalur keluar | client hasil `ssrf.Guard.Client` dipakai detector **dan** crawler: IP diperiksa saat dial, redirect divalidasi ulang |
+| Batas keluar | budget request per scan (default 60 × jumlah target), rate limit per host (5 rps / burst 10), timeout task dari config |
+| Pembatalan | `POST /scans/{id}/cancel` membatalkan context scan, bukan hanya kolom status |
 
-Masih **belum** (jangan diasumsikan jalan): engine HTTP/headless (stub),
-WebSocket stream (501), export/download report (501), template registry (`[]`),
-worker/RabbitMQ (stub), frontend-facing progress realtime.
+Masih **belum** (jangan diasumsikan jalan): engine headless (selalu error
+`ErrHeadlessNotImplemented`), crawl (kode ada, belum dipanggil), WebSocket stream
+(501), export/download report (501), template registry endpoint (`[]` — pakai
+daftar plugin di bawah), RabbitMQ (ditolak saat startup), frontend-facing
+progress realtime.
 
 ## 2. Menjalankan
 
@@ -54,7 +60,31 @@ ber-versi (golang-migrate) dipasang.
 | `CORS_ALLOW_CREDENTIALS` | false | |
 | `SSRF_ALLOWED_PORTS` | `80,443,8080,8443` | |
 | `SSRF_ALLOW_PRIVATE` | false | hanya untuk lab |
-| `RABBITMQ_ENABLED` | false | true → mode RabbitMQ (masih stub) |
+| `RABBITMQ_ENABLED` | false | true → **server menolak start**: publisher masih stub dan akan membuang task tanpa error |
+| `SCAN_RATE_PER_SECOND` | 5 | batas request per host, dibagi semua worker |
+| `SCAN_RATE_BURST` | 10 | |
+| `SCAN_MAX_REQUESTS_PER_SCAN` | 0 | 0 → diturunkan dari target × `SCAN_MAX_REQUESTS_PER_TARGET` |
+| `SCAN_MAX_REQUESTS_PER_TARGET` | 60 | 38 payload + 2 baseline per target dengan margin |
+| `SCAN_MAX_PAYLOADS_PER_PLUGIN` | 20 | |
+
+### Template selectors
+
+`template_selectors` adalah daftar dipisah koma. Satu term cocok bila sama dengan
+**id plugin**, **tag**, atau **severity** (tidak peka huruf besar/kecil).
+Kosong berarti semua plugin. Term yang tidak dikenal → `400`, bukan scan semua
+plugin. Contoh: `xss`, `critical`, `sqli,xss-reflected`.
+
+Plugin yang tersedia (registry embedded `internal/infrastructure/detector/plugins`):
+`idor`, `open-redirect`, `path-traversal`, `sql-injection-error`,
+`sql-injection-boolean`, `sql-injection-time`, `ssrf`, `xss-reflected`, `xxe`.
+
+### Budget dan pembatalan
+
+Setiap scan mendapat context sendiri dengan budget request. Saat budget habis,
+context dibatalkan: task yang sedang berjalan berhenti, scan ditandai
+`truncated: true` dan berstatus `completed` (laporan parsial, bukan gagal).
+`cancel` memakai jalur yang sama, jadi tidak ada lagi scan berstatus
+`cancelled` yang worker-nya masih menembak target.
 
 ## 3. Alur auth
 
@@ -121,18 +151,20 @@ Aturan yang harus dijaga saat menambah endpoint:
 - Crawler brute-force: pengiriman task `select` dengan `ctx.Done()` + `close` dijamin.
 - Crawler link discovery: drain antrean saat cancel agar `WaitGroup` mencapai nol.
 
-Belum dikerjakan: batas ukuran body respons di `detector/executor.go` dan
-`crawler/fetcher.go` (`io.ReadAll` masih unbounded), cleanup temp file PDF
-Chromium, dan `gofmt` untuk file lama yang tak tersentuh.
+Batas body respons sudah dikerjakan: `detector.MaxResponseBytes` dan
+`crawler.MaxBodyBytes` (2 MiB, ditandai `Truncated`). Belum: cleanup temp file PDF
+Chromium dan `gofmt` untuk file lama yang tak tersentuh.
 
 ## 7. Langkah berikutnya (prioritas)
 
-1. Wire `HTTPEngine.Execute` ke `detector` + `crawler` yang sudah ada, lalu
-   simpan finding via `findingRepo.CreateBatch`.
+1. Sambungkan crawl: `crawler.Run` → daftar URL/form → deteksi per hasil.
 2. Implementasikan WebSocket di atas `event.Bus` (+ `Unsubscribe` di `defer`).
-3. Ganti `io.ReadAll` dengan `io.LimitReader` + `resp.Body.Close()` yang konsisten.
-4. Migrasi ber-versi (golang-migrate) menggantikan `AutoMigrate`.
-5. Perbaiki test yang tidak dapat dikompilasi (`messaging_test.go`,
+3. Migrasi ber-versi (golang-migrate) menggantikan `AutoMigrate`; index unik
+   parsial `findings(scan_id,target,template_id) WHERE deleted_at IS NULL`
+   sudah dibuat lewat tag GORM dan perlu ikut dipindahkan.
+4. FK + strategi delete: hapus scan saat ini menghapus findings, tetapi ticket
+   yang menunjuk finding tersebut menjadi yatim (lihat §9).
+5. Perbaiki test yang masih di-`//go:build ignore` (`messaging_test.go`,
    `websocket_test.go`, `user_repository_test.go`, `headless_engine_test.go`).
 
 ## 8. Utang keamanan: CVE dependensi (per 2026-11-16)

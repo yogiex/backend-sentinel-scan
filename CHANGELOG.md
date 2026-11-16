@@ -20,7 +20,68 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
-Belum ada perubahan sejak 0.2.0.
+### Added
+
+- **[scan]** Mesin scanning benar-benar menembak target: `HTTPEngine` menjadi
+  adapter yang menjalankan **satu** plugin per task dari registry embedded
+  (`RunWithPlugins` + `Registry.Get`), lalu memetakan hasilnya ke `Finding`.
+  Sebelumnya `Execute` mengembalikan `Matched: false` tanpa satu pun request.
+- **[scan]** Enumerasi task dari `detector.Registry` (9 plugin) menggantikan
+  `template.Loader` yang membaca `./templates` kosong, sehingga `total_tasks`
+  tidak lagi nol dan scan dapat mencapai `completed`.
+- **[scan]** `template_selectors` benar-benar memfilter: satu term cocok dengan
+  id plugin, tag, atau severity; term tak dikenal → `400`; kosong → semua plugin.
+- **[security]** `internal/security/egress`: budget request per scan (lewat
+  context) dan rate limiter token-bucket per host yang dibagi semua worker.
+- **[security]** Detector dan crawler memakai client dari `ssrf.Guard.Client`,
+  jadi pemeriksaan IP saat dial dan validasi ulang redirect berlaku untuk
+  seluruh trafik scan — bukan hanya validasi URL saat submit.
+- **[persistence]** Index unik parsial `findings(scan_id, target, template_id)
+  WHERE deleted_at IS NULL` + `ON CONFLICT ... DO NOTHING` bertarget, membuat
+  penyimpanan temuan idempoten; `scan_jobs.truncated` untuk laporan parsial.
+- **[scan]** `PATCH/POST /scans/{id}/cancel` kini membatalkan context scan;
+  setiap scan punya context sendiri (`worker.Task.Ctx`) dan `orchestrator.Cancel`.
+- **[docs]** `docs/BACKEND-DEV.md`: tata bahasa selector, tabel budget, status
+  engine, dan sisa pekerjaan yang diperbarui.
+
+### Changed
+
+- **[scan]** Orchestrator menjadi satu-satunya penulis finding: result worker
+  dipersist via `CreateBatch` di dispatch loop, worker tetap tanpa akses DB.
+- **[scan]** Timeout task diambil dari `worker.task_timeout` (bukan konstanta
+  30 detik), dan tiap request dibatasi `detector.MaxResponseBytes` /
+  `crawler.MaxBodyBytes` (2 MiB) dengan penanda `Truncated`.
+- **[security]** `RABBITMQ_ENABLED=true` sekarang **menggagalkan startup**:
+  publisher masih stub dan akan membuang task tanpa error.
+- **[scan]** `HeadlessEngine` mengembalikan `ErrHeadlessNotImplemented` alih-alih
+  "tidak ada temuan", supaya scan headless tidak tampak bersih.
+
+### Fixed
+
+- **[scan]** Template `idor` dan `path-traversal` memakai path tanpa `?`
+  (`/api/users/FUZZ&id=FUZZ`), sehingga semua parameter setelah `&` menjadi
+  bagian path dan tiga dari empat titik injeksi tidak pernah diuji.
+- **[scan]** Payload tidak lagi disisipkan mentah ke URL: karakter `&`, `#`, dan
+  spasi di-encode persen (URL) sementara body tetap mentah agar payload XXE utuh.
+- **[scan]** `Registry.LoadFromDir` membaca file disk dari filesystem embedded
+  sehingga tidak pernah memuat apa pun; kini memakai `os.ReadFile` dan
+  mengembalikan error parsing alih-alih melewatinya diam-diam.
+- **[scan]** `Plugin.Validate` menolak method/severity/matcher tak dikenal,
+  payload kosong, id tidak valid, dan baseline yang mengandung `FUZZ`.
+
+### Security
+
+- **[scan]** Redirect dari target menuju `169.254.169.254`, `127.0.0.1`, atau
+  `10.0.0.0/8` kini gagal di lapisan dial; sebelumnya diikuti sampai 10 hop.
+- **[scan]** Respons target dibatasi 2 MiB untuk mencegah kehabisan memori worker.
+- **[scan]** Budget request membatasi volume keluar per scan (default 60 × target),
+  sehingga scan tidak bisa dipakai membanjiri target.
+
+### Tests
+
+- **[scan]** Test baru: budget/rate egress, validasi plugin, encoding payload,
+  batas body, resolusi selector, engine satu-plugin-per-task, guard redirect
+  metadata, serta alur orchestrator (progress, persistensi, cancel, truncated).
 
 ## [0.2.0] - 2026-11-16
 
