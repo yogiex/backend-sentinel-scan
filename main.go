@@ -177,7 +177,6 @@ func run() error {
 		Registry:           scanDetector.Registry(),
 		TaskQueue:          taskQueue,
 		ResultQueue:        resultQueue,
-		EventBus:           eventBus,
 		ScanRepo:           scanRepo,
 		FindingRepo:        findingRepo,
 		MaxRequestsPerScan: int64(envInt("SCAN_MAX_REQUESTS_PER_SCAN", 0)),

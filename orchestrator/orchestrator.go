@@ -11,7 +11,6 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/detector"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/worker"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/egress"
 )
@@ -23,7 +22,6 @@ type Config struct {
 	Registry    *detector.Registry
 	TaskQueue   chan worker.Task
 	ResultQueue chan worker.Result
-	EventBus    *event.Bus
 	ScanRepo    repository.ScanRepository
 	FindingRepo repository.FindingRepository
 	// MaxRequestsPerScan caps outbound requests for one scan. Zero means the
