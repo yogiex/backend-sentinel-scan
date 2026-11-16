@@ -25,9 +25,19 @@ const (
 	maxConfigBytes  = 32 << 10
 )
 
-// ScanDispatcher starts execution of a persisted scan.
+// ScanDispatcher starts and stops execution of a persisted scan.
 type ScanDispatcher interface {
 	StartScan(scanID uint, targets []string, templateSelectors string) error
+	// Cancel stops the work in flight. Changing the status alone would leave a
+	// scan marked "cancelled" while its workers kept sending requests.
+	Cancel(scanID uint) bool
+}
+
+// TemplateCatalog resolves template selectors at submission time, so a selector
+// that matches nothing is rejected with 400 instead of producing a scan that
+// never runs.
+type TemplateCatalog interface {
+	ResolveIDs(selectors string) ([]string, error)
 }
 
 // ── Scan ────────────────────────────────────────────────────
@@ -38,6 +48,7 @@ type ScanService struct {
 	creds      repository.AuthCredentialRepository
 	guard      *ssrf.Guard
 	dispatcher ScanDispatcher
+	catalog    TemplateCatalog
 }
 
 func NewScanService(
@@ -48,6 +59,12 @@ func NewScanService(
 	dispatcher ScanDispatcher,
 ) *ScanService {
 	return &ScanService{scans: scans, findings: findings, creds: creds, guard: guard, dispatcher: dispatcher}
+}
+
+// WithCatalog enables selector validation before a scan is persisted.
+func (s *ScanService) WithCatalog(catalog TemplateCatalog) *ScanService {
+	s.catalog = catalog
+	return s
 }
 
 // StartScan validates, persists, and dispatches a scan for the given actor.
@@ -61,6 +78,15 @@ func (s *ScanService) StartScan(ctx context.Context, actor policy.Actor, targets
 	}
 	if len(templateSelectors) > maxSelectorsLen {
 		return nil, apperr.NewAppError("INVALID_INPUT", "template_selectors is too large", 400)
+	}
+	if s.catalog != nil {
+		ids, err := s.catalog.ResolveIDs(templateSelectors)
+		if err != nil {
+			return nil, apperr.NewAppError("INVALID_INPUT", "Invalid template_selectors: "+err.Error(), 400)
+		}
+		if len(ids) == 0 {
+			return nil, apperr.NewAppError("INVALID_INPUT", "template_selectors matched no templates", 400)
+		}
 	}
 
 	if authCredentialID != nil {
@@ -172,7 +198,15 @@ func (s *ScanService) CancelScan(ctx context.Context, actor policy.Actor, id uin
 	if _, err := s.getOwnedScan(ctx, actor, id); err != nil {
 		return err
 	}
-	return s.scans.UpdateStatus(ctx, id, entity.ScanStatusCancelled)
+	if err := s.scans.UpdateStatus(ctx, id, entity.ScanStatusCancelled); err != nil {
+		return err
+	}
+	// Only stop the workers once the state machine accepted the transition;
+	// cancelling a finished scan would be a lie about what happened.
+	if s.dispatcher != nil {
+		s.dispatcher.Cancel(id)
+	}
+	return nil
 }
 
 // ListScans returns scans visible to actor, newest first.

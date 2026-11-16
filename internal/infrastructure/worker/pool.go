@@ -26,6 +26,7 @@ type Pool struct {
 	httpEngine     *scanner.HTTPEngine
 	headlessEngine *scanner.HeadlessEngine
 	sessionManager *authscan.SessionManager
+	taskTimeout    time.Duration
 }
 
 func NewPool(ctx context.Context, size int, taskQueue chan Task, resultQueue chan Result, eventBus *event.Bus) *Pool {
@@ -62,6 +63,20 @@ func (p *Pool) WithSessionManager(sm *authscan.SessionManager) *Pool {
 	return p
 }
 
+// WithTimeout sets the per-task deadline. A zero value keeps the 30s default,
+// which is only a safety net for callers that do not configure anything.
+func (p *Pool) WithTimeout(d time.Duration) *Pool {
+	p.taskTimeout = d
+	return p
+}
+
+func (p *Pool) timeout() time.Duration {
+	if p.taskTimeout > 0 {
+		return p.taskTimeout
+	}
+	return 30 * time.Second
+}
+
 func (p *Pool) Start() {
 	if p.useRabbitMQ {
 		return
@@ -85,7 +100,7 @@ func (p *Pool) worker(id int) {
 			result := p.executeTask(task)
 			select {
 			case p.resultQueue <- result:
-				if result.Finding != nil && result.Finding.Matched {
+				if p.eventBus != nil && result.Finding != nil && result.Finding.Matched {
 					p.eventBus.PublishFinding(fmt.Sprintf("%d", task.ScanID), result.Finding)
 				}
 			case <-p.ctx.Done():
@@ -180,8 +195,16 @@ func (p *Pool) executeTask(task Task) Result {
 				TemplateID: task.TemplateID,
 				Matched:    false,
 			},
+			Error: scanner.ErrEngineNotConfigured,
 		}
 	}
+
+	parent := task.Ctx
+	if parent == nil {
+		parent = p.ctx
+	}
+	execCtx, cancel := context.WithTimeout(parent, p.timeout())
+	defer cancel()
 
 	scanTask := scanner.Task{
 		ScanID:     task.ScanID,
@@ -190,9 +213,8 @@ func (p *Pool) executeTask(task Task) Result {
 		Engine:     scanner.EngineHTTP,
 		Session:    task.Session,
 	}
-	execCtx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
-	defer cancel()
 	result := p.httpEngine.Execute(execCtx, scanTask)
+
 	workerFinding := &Finding{
 		Target:     task.Target,
 		TemplateID: task.TemplateID,
@@ -204,10 +226,11 @@ func (p *Pool) executeTask(task Task) Result {
 		workerFinding.Details = result.Finding.Details
 	}
 	return Result{
-		TaskID:  task.ID,
-		ScanID:  task.ScanID,
-		Finding: workerFinding,
-		Error:   result.Error,
+		TaskID:    task.ID,
+		ScanID:    task.ScanID,
+		Finding:   workerFinding,
+		Truncated: result.Truncated,
+		Error:     result.Error,
 	}
 }
 

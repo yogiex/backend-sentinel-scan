@@ -21,6 +21,7 @@ type ScanJob struct {
 	Targets           datatypes.JSON `gorm:"type:jsonb;not null"`
 	TemplateSelectors datatypes.JSON `gorm:"type:jsonb"`
 	Status            string         `gorm:"type:varchar(20);not null;default:pending;index"`
+	Truncated         bool           `gorm:"not null;default:false"`
 	TotalTasks        int            `gorm:"not null;default:0"`
 	CompletedTasks    int            `gorm:"not null;default:0"`
 	FailedTasks       int            `gorm:"not null;default:0"`
@@ -28,11 +29,17 @@ type ScanJob struct {
 	AuthCredentialID  *uint          `gorm:"index"`
 }
 
+// Finding carries a partial unique index on (scan_id, target, template_id).
+//
+// Without it "insert if absent" is a no-op: clause.OnConflict needs a real
+// constraint to conflict with, so a task executed twice used to add a second
+// row and inflate the report. The index is partial because findings are
+// soft-deleted; a deleted finding must not block a re-scan.
 type Finding struct {
 	gorm.Model
-	ScanID     uint           `gorm:"not null;index"`
-	Target     string         `gorm:"type:text;not null"`
-	TemplateID string         `gorm:"type:text;not null"`
+	ScanID     uint           `gorm:"not null;uniqueIndex:idx_findings_scan_target_template,where:deleted_at IS NULL"`
+	Target     string         `gorm:"type:text;not null;uniqueIndex:idx_findings_scan_target_template,where:deleted_at IS NULL"`
+	TemplateID string         `gorm:"type:text;not null;uniqueIndex:idx_findings_scan_target_template,where:deleted_at IS NULL"`
 	Matched    bool           `gorm:"not null;default:false"`
 	Severity   string         `gorm:"type:varchar(20);not null;default:info;index"`
 	Details    datatypes.JSON `gorm:"type:jsonb"`
@@ -159,6 +166,7 @@ func (m *ScanJob) toEntity() *entity.ScanJob {
 		Targets:           decodeStrings(m.Targets),
 		TemplateSelectors: decodeString(m.TemplateSelectors),
 		Status:            entity.ScanStatus(m.Status),
+		Truncated:         m.Truncated,
 		Progress: &entity.ScanProgress{
 			TotalTasks: m.TotalTasks,
 			Completed:  m.CompletedTasks,
@@ -181,6 +189,7 @@ func scanFromEntity(e *entity.ScanJob) *ScanJob {
 		Targets:           encodeJSON(nonNilStrings(e.Targets)),
 		TemplateSelectors: encodeString(e.TemplateSelectors),
 		Status:            status,
+		Truncated:         e.Truncated,
 		AuthCredentialID:  e.AuthCredentialID,
 	}
 	if e.Progress != nil {

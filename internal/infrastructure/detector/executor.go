@@ -8,78 +8,74 @@ import (
 	"time"
 )
 
+// MaxResponseBytes caps how much of a response body is read into memory. A
+// scanner that trusts the target's Content-Length is a memory-exhaustion bug:
+// fifty workers reading an endless body take the process down.
+const MaxResponseBytes = 2 << 20 // 2 MiB
+
+// DefaultUserAgent identifies the scanner to the target. Being identifiable is
+// part of scanning responsibly.
+const DefaultUserAgent = "SentinelScan-Detector/1.0"
+
 type ExecutorResponse struct {
 	Body       string
 	StatusCode int
 	Headers    http.Header
 	Duration   time.Duration
+	// Truncated reports that the body exceeded MaxResponseBytes and was cut.
+	Truncated bool
 }
 
 type HTTPExecutor struct {
-	client  *http.Client
-	config  DetectionConfig
+	client HTTPClient
+	config DetectionConfig
 }
 
+// NewHTTPExecutor returns an executor using cfg.Client when provided. Callers
+// outside tests must provide a client hardened by the SSRF guard and the egress
+// limiter; the fallback below exists only so unit tests stay simple.
 func NewHTTPExecutor(cfg DetectionConfig) *HTTPExecutor {
-	return &HTTPExecutor{
-		client: &http.Client{
-			Timeout: cfg.Timeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return http.ErrUseLastResponse
-				}
-				return nil
-			},
+	client := cfg.Client
+	if client == nil {
+		client = NewDefaultClient(cfg.Timeout)
+	}
+	return &HTTPExecutor{client: client, config: cfg}
+}
+
+// NewDefaultClient builds the unguarded client used when no client is injected.
+func NewDefaultClient(timeout time.Duration) HTTPClient {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return http.ErrUseLastResponse
+			}
+			return nil
 		},
-		config: cfg,
 	}
 }
 
 func (e *HTTPExecutor) Execute(ctx context.Context, target string, plugin *Plugin, payload Payload) (*ExecutorResponse, error) {
-	payloadValue := payload.Value
-	if payload.Encoded {
-		payloadValue = EncodePayload(payloadValue)
-	}
-
-	reqURL := ResolveTargetPath(target, plugin.Path, payloadValue)
+	// The payload is percent-encoded for the URL but left raw in the body: an
+	// XXE payload carries XML entities, and encoding those would destroy them.
+	reqURL := ResolveTargetPath(target, plugin.Path, EncodePayload(payload.Value))
 
 	var bodyReader io.Reader
 	if plugin.Body != "" {
-		bodyContent := ReplacePlaceholders(plugin.Body, target, payloadValue)
-		bodyReader = strings.NewReader(bodyContent)
+		bodyReader = strings.NewReader(ReplacePlaceholders(plugin.Body, target, payload.Value))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, plugin.Method, reqURL, bodyReader)
 	if err != nil {
 		return nil, err
 	}
-
 	for k, v := range plugin.Headers {
 		req.Header.Set(k, v)
 	}
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", "SentinelScan-Detector/1.0")
-	}
-
-	start := time.Now()
-	resp, err := e.client.Do(req)
-	duration := time.Since(start)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ExecutorResponse{
-		Body:       string(bodyBytes),
-		StatusCode: resp.StatusCode,
-		Headers:    resp.Header,
-		Duration:   duration,
-	}, nil
+	return e.do(req)
 }
 
 func (e *HTTPExecutor) ExecuteBaseline(ctx context.Context, target string, plugin *Plugin) (*ExecutorResponse, error) {
@@ -119,12 +115,16 @@ func (e *HTTPExecutor) ExecuteBaseline(ctx context.Context, target string, plugi
 	if err != nil {
 		return nil, err
 	}
-
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	return e.do(req)
+}
+
+// do sends req and reads at most MaxResponseBytes of the response body.
+func (e *HTTPExecutor) do(req *http.Request) (*ExecutorResponse, error) {
 	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", "SentinelScan-Detector/1.0")
+		req.Header.Set("User-Agent", DefaultUserAgent)
 	}
 
 	start := time.Now()
@@ -135,15 +135,31 @@ func (e *HTTPExecutor) ExecuteBaseline(ctx context.Context, target string, plugi
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	body, truncated, err := readBounded(resp.Body, MaxResponseBytes)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ExecutorResponse{
-		Body:       string(bodyBytes),
+		Body:       body,
 		StatusCode: resp.StatusCode,
 		Headers:    resp.Header,
 		Duration:   duration,
+		Truncated:  truncated,
 	}, nil
+}
+
+// readBounded reads at most limit bytes, reporting whether the body was longer.
+func readBounded(r io.Reader, limit int64) (string, bool, error) {
+	if limit <= 0 {
+		limit = MaxResponseBytes
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return "", false, err
+	}
+	if int64(len(buf)) > limit {
+		return string(buf[:limit]), true, nil
+	}
+	return string(buf), false, nil
 }

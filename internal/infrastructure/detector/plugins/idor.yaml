@@ -7,7 +7,7 @@ metadata:
 
 engine: "http"
 method: "GET"
-path: "/api/users/FUZZ&id=FUZZ&userId=FUZZ"
+path: "/api/users/FUZZ?id=FUZZ&userId=FUZZ"
 
 payloads:
   - name: "adjacent-id"

@@ -7,16 +7,28 @@ import (
 	"time"
 )
 
+// HTTPClient is the contract the crawler needs from an HTTP client, so callers
+// can supply one hardened by the SSRF guard and the egress limiter.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// MaxBodyBytes caps how much of a crawled page is read into memory.
+const MaxBodyBytes = 2 << 20 // 2 MiB
+
 type FetcherConfig struct {
 	Timeout   time.Duration
 	RateLimit time.Duration
 	UserAgent string
 	Headers   map[string]string
+	// Client is used as-is when set; the fallback below is unguarded and only
+	// appropriate for tests.
+	Client HTTPClient
 }
 
 type Fetcher struct {
 	config    FetcherConfig
-	client    *http.Client
+	client    HTTPClient
 	rateLimit *time.Ticker
 }
 
@@ -28,18 +40,23 @@ type FetchResult struct {
 }
 
 func NewFetcher(cfg FetcherConfig) *Fetcher {
-	f := &Fetcher{
-		config: cfg,
-		client: &http.Client{
-			Timeout: cfg.Timeout,
+	client := cfg.Client
+	if client == nil {
+		timeout := cfg.Timeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		client = &http.Client{
+			Timeout: timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
+				if len(via) >= 5 {
 					return http.ErrUseLastResponse
 				}
 				return nil
 			},
-		},
+		}
 	}
+	f := &Fetcher{config: cfg, client: client}
 
 	if cfg.RateLimit > 0 {
 		f.rateLimit = time.NewTicker(cfg.RateLimit)
@@ -75,9 +92,12 @@ func (f *Fetcher) Fetch(ctx context.Context, urlStr string) (*FetchResult, error
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > MaxBodyBytes {
+		body = body[:MaxBodyBytes]
 	}
 
 	finalURL := urlStr

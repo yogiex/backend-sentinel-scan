@@ -143,6 +143,20 @@ func (r *scanRepository) UpdateProgress(ctx context.Context, id uint, progress *
 	return nil
 }
 
+func (r *scanRepository) SetTruncated(ctx context.Context, id uint) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	res := r.db.WithContext(ctx).Model(&ScanJob{}).Where("id = ?", id).Update("truncated", true)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return apperr.ErrNotFound
+	}
+	return nil
+}
+
 func (r *scanRepository) List(ctx context.Context, filter repository.ScanFilter) ([]*entity.ScanJob, error) {
 	if err := r.ready(); err != nil {
 		return nil, err

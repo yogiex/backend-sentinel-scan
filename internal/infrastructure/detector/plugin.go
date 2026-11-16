@@ -2,9 +2,28 @@ package detector
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// pluginIDPattern keeps ids usable as selector terms and as URL/JSON values.
+var pluginIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+var validMethods = map[string]struct{}{
+	"GET": {}, "POST": {}, "PUT": {}, "PATCH": {}, "DELETE": {}, "HEAD": {},
+}
+
+var validSeverities = map[Severity]struct{}{
+	SeverityCritical: {}, SeverityHigh: {}, SeverityMedium: {},
+	SeverityLow: {}, SeverityInfo: {},
+}
+
+var validMatcherTypes = map[MatcherType]struct{}{
+	MatcherKeyword: {}, MatcherRegex: {}, MatcherErrorBased: {},
+	MatcherBoolean: {}, MatcherTimeBased: {}, MatcherStatus: {},
+}
 
 func ParsePlugin(data []byte) (*Plugin, error) {
 	var plugin Plugin
@@ -18,6 +37,7 @@ func ParsePlugin(data []byte) (*Plugin, error) {
 	if plugin.Method == "" {
 		plugin.Method = "GET"
 	}
+	plugin.Method = strings.ToUpper(plugin.Method)
 	if plugin.Path == "" {
 		return nil, fmt.Errorf("plugin %s missing required field: path", plugin.Metadata.ID)
 	}
@@ -26,9 +46,6 @@ func ParsePlugin(data []byte) (*Plugin, error) {
 	}
 	if plugin.Metadata.Severity == "" {
 		plugin.Metadata.Severity = SeverityInfo
-	}
-	if len(plugin.Matchers) == 0 {
-		return nil, fmt.Errorf("plugin %s has no matchers", plugin.Metadata.ID)
 	}
 
 	for i := range plugin.Matchers {
@@ -51,23 +68,73 @@ func ParsePlugin(data []byte) (*Plugin, error) {
 		if plugin.Baseline.Method == "" {
 			plugin.Baseline.Method = "GET"
 		}
+		plugin.Baseline.Method = strings.ToUpper(plugin.Baseline.Method)
 		if plugin.Baseline.Path == "" {
 			plugin.Baseline.Path = plugin.Path
 		}
 	}
 
+	if err := plugin.Validate(); err != nil {
+		return nil, err
+	}
 	return &plugin, nil
 }
 
+// Validate rejects definitions that would either produce no request at all or
+// fail silently at execution time.
+//
+// The path check exists because of a real defect: a template written as
+// "/api/users/FUZZ&id=FUZZ" has no "?", so every parameter after the first
+// becomes part of the path and is never sent as a query value. The probe looks
+// like it covers four injection points and covers one.
 func (p *Plugin) Validate() error {
 	if p.Metadata.ID == "" {
 		return fmt.Errorf("plugin id is required")
 	}
+	if !pluginIDPattern.MatchString(p.Metadata.ID) {
+		return fmt.Errorf("plugin %q id must match %s", p.Metadata.ID, pluginIDPattern)
+	}
+	if p.Method != "" {
+		if _, ok := validMethods[p.Method]; !ok {
+			return fmt.Errorf("plugin %s has unsupported method %q", p.Metadata.ID, p.Method)
+		}
+	}
 	if p.Path == "" {
 		return fmt.Errorf("plugin %s path is required", p.Metadata.ID)
 	}
+	if !strings.HasPrefix(p.Path, "/") {
+		return fmt.Errorf("plugin %s path must start with /", p.Metadata.ID)
+	}
+	if eq := strings.Index(p.Path, "="); eq >= 0 {
+		if q := strings.Index(p.Path, "?"); q < 0 || eq < q {
+			return fmt.Errorf(
+				"plugin %s path %q has parameters but no '?': everything after the first '&' would be sent as part of the path",
+				p.Metadata.ID, p.Path)
+		}
+	}
+	// An empty severity means "default it": ParsePlugin fills it in, but tests
+	// and programmatic callers may leave it zero.
+	if p.Metadata.Severity != "" {
+		if _, ok := validSeverities[p.Metadata.Severity]; !ok {
+			return fmt.Errorf("plugin %s has invalid severity %q", p.Metadata.ID, p.Metadata.Severity)
+		}
+	}
 	if len(p.Matchers) == 0 {
 		return fmt.Errorf("plugin %s must have at least one matcher", p.Metadata.ID)
+	}
+	for i, m := range p.Matchers {
+		if _, ok := validMatcherTypes[m.Type]; !ok {
+			return fmt.Errorf("plugin %s matcher %d has unknown type %q", p.Metadata.ID, i, m.Type)
+		}
+	}
+	for i, payload := range p.Payloads {
+		if strings.TrimSpace(payload.Value) == "" {
+			return fmt.Errorf("plugin %s payload %d has an empty value", p.Metadata.ID, i)
+		}
+	}
+	if p.Baseline != nil && strings.Contains(p.Baseline.Path, PlaceholderFUZZ) {
+		return fmt.Errorf("plugin %s baseline path must not contain %s: the baseline is the control request",
+			p.Metadata.ID, PlaceholderFUZZ)
 	}
 	return nil
 }

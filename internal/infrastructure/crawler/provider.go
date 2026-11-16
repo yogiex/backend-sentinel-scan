@@ -8,12 +8,12 @@ type DiscoveryProvider interface {
 }
 
 type SharedInfra struct {
-	Dedup     *Deduplicator
-	Scope     *ScopeFilter
-	Fetcher   *Fetcher
-	Robots    *RobotsFilter
-	OnURL     func(DiscoveredURL)
-	OnError   func(error)
+	Dedup   *Deduplicator
+	Scope   *ScopeFilter
+	Fetcher *Fetcher
+	Robots  *RobotsFilter
+	OnURL   func(DiscoveredURL)
+	OnError func(error)
 }
 
 func NewSharedInfra(cfg CrawlConfig) SharedInfra {
@@ -25,10 +25,11 @@ func NewSharedInfra(cfg CrawlConfig) SharedInfra {
 	}
 
 	fetcherCfg := FetcherConfig{
-		Timeout:       cfg.Link.Timeout,
-		RateLimit:     cfg.Link.RateLimit,
-		UserAgent:     cfg.Link.UserAgent,
-		Headers:       cfg.Link.Headers,
+		Timeout:   cfg.Link.Timeout,
+		RateLimit: cfg.Link.RateLimit,
+		UserAgent: cfg.Link.UserAgent,
+		Headers:   cfg.Link.Headers,
+		Client:    cfg.Client,
 	}
 
 	return SharedInfra{

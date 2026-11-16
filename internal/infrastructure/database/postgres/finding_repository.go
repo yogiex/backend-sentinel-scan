@@ -52,8 +52,19 @@ func (r *findingRepository) CreateBatch(ctx context.Context, findings []*entity.
 	if len(models) == 0 {
 		return nil
 	}
+	// The conflict target must name the partial unique index and repeat its
+	// predicate, otherwise Postgres cannot infer which index to use and the
+	// whole clause is either ignored or rejected.
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(&models, 500).Error
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "scan_id"}, {Name: "target"}, {Name: "template_id"},
+			},
+			TargetWhere: clause.Where{Exprs: []clause.Expression{
+				clause.Eq{Column: clause.Column{Name: "deleted_at"}, Value: nil},
+			}},
+			DoNothing: true,
+		}).CreateInBatches(&models, 500).Error
 	})
 }
 

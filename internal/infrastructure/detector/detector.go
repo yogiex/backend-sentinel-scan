@@ -9,35 +9,50 @@ import (
 type Detector struct {
 	config  DetectionConfig
 	plugins []*Plugin
+	exec    *HTTPExecutor
+	reg     *Registry
 }
 
+// New builds a Detector. The HTTP client is taken from cfg and shared by every
+// plugin execution: creating one client per task throws away the connection pool
+// and, worse, the egress budget attached to it.
 func New(cfg DetectionConfig) *Detector {
 	return &Detector{
-		config:  cfg,
-		plugins: nil,
+		config: cfg,
+		exec:   NewHTTPExecutor(cfg),
 	}
 }
 
+// LoadPlugins loads the embedded plugin set and keeps its registry.
 func (d *Detector) LoadPlugins() error {
 	reg := NewRegistry()
 	if err := reg.LoadEmbedded(); err != nil {
-		return fmt.Errorf("failed to load embedded plugins: %w", err)
+		return fmt.Errorf("load embedded plugins: %w", err)
 	}
+	d.reg = reg
 	d.plugins = reg.List()
-	log.Printf("Loaded %d detection plugins", len(d.plugins))
+	log.Printf("loaded %d detection plugins", len(d.plugins))
 	return nil
 }
+
+// Registry exposes the loaded plugin set so callers can enumerate and resolve
+// selectors without duplicating the load path.
+func (d *Detector) Registry() *Registry { return d.reg }
 
 func (d *Detector) Run(ctx context.Context, target string) []PluginResult {
 	return d.RunWithPlugins(ctx, target, d.plugins)
 }
 
+// RunWithPlugins executes the given plugins against one target, returning only
+// the ones that matched.
 func (d *Detector) RunWithPlugins(ctx context.Context, target string, plugins []*Plugin) []PluginResult {
 	if len(plugins) == 0 {
 		return nil
 	}
-
-	exec := NewHTTPExecutor(d.config)
+	exec := d.exec
+	if exec == nil {
+		exec = NewHTTPExecutor(d.config)
+	}
 
 	var results []PluginResult
 	for _, plugin := range plugins {
@@ -111,12 +126,15 @@ func (d *Detector) executePlugin(ctx context.Context, exec *HTTPExecutor, plugin
 
 			if match.Matched {
 				return PluginResult{
-					PluginID:     plugin.Metadata.ID,
-					Target:       target,
-					Matched:      true,
-					Severity:     plugin.Metadata.Severity,
-					Matches:      []MatchResult{match},
-					ResponseBody: response.Body,
+					PluginID:          plugin.Metadata.ID,
+					Target:            target,
+					Matched:           true,
+					Severity:          plugin.Metadata.Severity,
+					Matches:           []MatchResult{match},
+					ResponseBody:      response.Body,
+					StatusCode:        response.StatusCode,
+					ResponseTruncated: response.Truncated,
+					Duration:          response.Duration,
 				}
 			}
 		}
@@ -126,5 +144,8 @@ func (d *Detector) executePlugin(ctx context.Context, exec *HTTPExecutor, plugin
 }
 
 func (d *Detector) Plugins() []*Plugin {
-	return d.plugins
+	if d.reg != nil {
+		return d.reg.List()
+	}
+	return append([]*Plugin(nil), d.plugins...)
 }

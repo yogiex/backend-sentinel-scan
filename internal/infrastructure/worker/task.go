@@ -1,18 +1,17 @@
 package worker
 
-import (
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/authscan"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/template"
-)
+import "context"
 
 type Task struct {
 	ID         string
 	ScanID     uint
 	Target     string
 	TemplateID string
-	Template   *template.NucleiTemplate
-	Retries    int
-	Session    *authscan.Session
+	// Ctx carries the scan's context: cancelling a scan or exhausting its
+	// request budget must stop the work already handed to a worker, which is
+	// impossible with a pool-global context.
+	Ctx     context.Context
+	Session any
 }
 
 type Finding struct {
@@ -27,5 +26,8 @@ type Result struct {
 	TaskID  string
 	ScanID  uint
 	Finding *Finding
-	Error   error
+	// Truncated reports that the scan ran out of request budget; the report is
+	// partial on purpose and must say so.
+	Truncated bool
+	Error     error
 }

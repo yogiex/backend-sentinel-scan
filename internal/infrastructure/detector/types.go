@@ -1,6 +1,9 @@
 package detector
 
-import "time"
+import (
+	"net/http"
+	"time"
+)
 
 type Severity string
 
@@ -12,11 +15,21 @@ const (
 	SeverityInfo     Severity = "info"
 )
 
+// HTTPClient is the contract the detector needs from an HTTP client. It exists
+// so the caller can supply a client hardened by the SSRF guard and the egress
+// limiter; a nil value falls back to a plain client (tests only).
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 type DetectionConfig struct {
-	PluginsDir            string
-	DefaultSeverity       Severity
-	MaxPayloadsPerPlugin  int
-	Timeout               time.Duration
+	PluginsDir           string
+	DefaultSeverity      Severity
+	MaxPayloadsPerPlugin int
+	Timeout              time.Duration
+	// Client is shared by every plugin executed by one Detector. Sharing it is
+	// what keeps connection pools and the egress budget meaningful.
+	Client HTTPClient
 }
 
 type PluginMetadata struct {
@@ -29,15 +42,15 @@ type PluginMetadata struct {
 }
 
 type Plugin struct {
-	Metadata  PluginMetadata    `yaml:"metadata"`
-	Engine    string            `yaml:"engine"`
-	Method    string            `yaml:"method"`
-	Path      string            `yaml:"path"`
-	Headers   map[string]string `yaml:"headers"`
-	Body      string            `yaml:"body"`
-	Payloads  []Payload         `yaml:"payloads"`
-	Matchers  []MatcherConfig   `yaml:"matchers"`
-	Baseline  *BaselineRequest  `yaml:"baseline"`
+	Metadata PluginMetadata    `yaml:"metadata"`
+	Engine   string            `yaml:"engine"`
+	Method   string            `yaml:"method"`
+	Path     string            `yaml:"path"`
+	Headers  map[string]string `yaml:"headers"`
+	Body     string            `yaml:"body"`
+	Payloads []Payload         `yaml:"payloads"`
+	Matchers []MatcherConfig   `yaml:"matchers"`
+	Baseline *BaselineRequest  `yaml:"baseline"`
 }
 
 type BaselineRequest struct {
@@ -90,7 +103,11 @@ type PluginResult struct {
 	Severity     Severity
 	Matches      []MatchResult
 	ResponseBody string
-	Duration     time.Duration
+	StatusCode   int
+	// ResponseTruncated reports that the evidence came from a body cut at
+	// MaxResponseBytes, so a "not matched" verdict is not authoritative.
+	ResponseTruncated bool
+	Duration          time.Duration
 }
 
 func DefaultDetectionConfig() DetectionConfig {

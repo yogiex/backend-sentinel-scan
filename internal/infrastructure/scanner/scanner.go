@@ -2,14 +2,26 @@ package scanner
 
 import (
 	"context"
-	"time"
+	"errors"
+	"fmt"
+
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/detector"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/egress"
 )
 
 type EngineType string
 
 const (
-	EngineHTTP    EngineType = "http"
+	EngineHTTP     EngineType = "http"
 	EngineHeadless EngineType = "headless"
+)
+
+// Errors returned by the engines. Callers map them to failed tasks; they are
+// never reported as "no finding", because that would hide a broken scan.
+var (
+	ErrEngineNotConfigured    = errors.New("scanner: engine is not configured")
+	ErrUnknownTemplate        = errors.New("scanner: unknown template")
+	ErrHeadlessNotImplemented = errors.New("scanner: headless engine is not implemented")
 )
 
 type EngineConfig struct {
@@ -28,6 +40,9 @@ type Task struct {
 type Result struct {
 	Finding *Finding
 	Error   error
+	// Truncated reports that the scan's request budget was exhausted while this
+	// task was running, so the report is partial by design.
+	Truncated bool
 }
 
 type Finding struct {
@@ -38,33 +53,96 @@ type Finding struct {
 	Details    map[string]interface{}
 }
 
+// HTTPEngine executes exactly one plugin per task.
+//
+// One plugin per task is not a detail: the orchestrator computes progress as
+// targets x plugins, so an engine that ran every plugin on every task would
+// issue N times the expected traffic while reporting N times the progress.
 type HTTPEngine struct {
-	config EngineConfig
-	client *httpClient
+	config   EngineConfig
+	detector *detector.Detector
 }
 
-type httpClient struct {
-	timeout time.Duration
-}
-
-func NewHTTPEngine(cfg EngineConfig) *HTTPEngine {
-	return &HTTPEngine{
-		config: cfg,
-		client: &httpClient{timeout: time.Duration(cfg.TimeoutSec) * time.Second},
-	}
+func NewHTTPEngine(cfg EngineConfig, det *detector.Detector) *HTTPEngine {
+	return &HTTPEngine{config: cfg, detector: det}
 }
 
 func (e *HTTPEngine) Execute(ctx context.Context, task Task) *Result {
-	return &Result{
+	if e.detector == nil || e.detector.Registry() == nil {
+		return &Result{Error: ErrEngineNotConfigured}
+	}
+
+	plugin := e.detector.Registry().Get(task.TemplateID)
+	if plugin == nil {
+		return &Result{Error: fmt.Errorf("%w: %q", ErrUnknownTemplate, task.TemplateID)}
+	}
+
+	matches := e.detector.RunWithPlugins(ctx, task.Target, []*detector.Plugin{plugin})
+
+	result := &Result{
 		Finding: &Finding{
 			Target:     task.Target,
-			TemplateID: task.TemplateID,
-			Matched:    false,
-			Severity:   "info",
+			TemplateID: plugin.Metadata.ID,
+			Matched:    len(matches) > 0,
+			Severity:   string(plugin.Metadata.Severity),
 		},
+		Truncated: budgetExhausted(ctx),
 	}
+	if len(matches) > 0 {
+		result.Finding.Details = buildDetails(plugin, matches[0])
+	}
+	return result
 }
 
+// budgetExhausted reports whether this scan ran out of request budget.
+func budgetExhausted(ctx context.Context) bool {
+	b := egress.FromContext(ctx)
+	return b != nil && b.Exhausted()
+}
+
+// buildDetails produces the JSONB payload stored with a finding.
+//
+// The response body is deliberately absent: it belongs to the target, may be
+// large, and may contain personal data. Only the extracted evidence survives.
+func buildDetails(plugin *detector.Plugin, res detector.PluginResult) map[string]interface{} {
+	matches := make([]map[string]interface{}, 0, len(res.Matches))
+	for _, m := range res.Matches {
+		evidence := m.Evidence
+		if len(evidence) > maxEvidenceBytes {
+			evidence = evidence[:maxEvidenceBytes]
+		}
+		matches = append(matches, map[string]interface{}{
+			"type":     string(m.Type),
+			"pattern":  m.Pattern,
+			"payload":  m.Payload,
+			"evidence": evidence,
+		})
+	}
+
+	details := map[string]interface{}{
+		"plugin_id":   plugin.Metadata.ID,
+		"plugin_name": plugin.Metadata.Name,
+		"severity":    string(plugin.Metadata.Severity),
+		"tags":        plugin.Metadata.Tags,
+		"response": map[string]interface{}{
+			"status_code":    res.StatusCode,
+			"body_truncated": res.ResponseTruncated,
+			"duration_ms":    res.Duration.Milliseconds(),
+		},
+		"matches": matches,
+	}
+	if plugin.Metadata.Reference != "" {
+		details["reference"] = plugin.Metadata.Reference
+	}
+	return details
+}
+
+// maxEvidenceBytes keeps one finding's details far below the 4 KB budget; the
+// matcher already trims evidence, this is the second line of defence.
+const maxEvidenceBytes = 1024
+
+// HeadlessEngine is a placeholder. It returns an error rather than an empty
+// result so a headless scan cannot be mistaken for a clean one.
 type HeadlessEngine struct {
 	config EngineConfig
 }
@@ -74,12 +152,5 @@ func NewHeadlessEngine(cfg EngineConfig) *HeadlessEngine {
 }
 
 func (e *HeadlessEngine) Execute(ctx context.Context, task Task) *Result {
-	return &Result{
-		Finding: &Finding{
-			Target:     task.Target,
-			TemplateID: task.TemplateID,
-			Matched:    false,
-			Severity:   "info",
-		},
-	}
+	return &Result{Error: ErrHeadlessNotImplemented}
 }

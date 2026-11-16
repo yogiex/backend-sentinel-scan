@@ -44,15 +44,15 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/authscan"
 	dbpkg "github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/database/postgres"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/detector"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/messaging"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/scanner"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/worker"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/middleware"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/egress"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/secretbox"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/ssrf"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/orchestrator"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/template"
 )
 
 func main() {
@@ -116,18 +116,37 @@ func run() error {
 		return err
 	}
 
-	// ── Scanning infrastructure ─────────────────────────────
-	templateLoader, err := template.NewLoader(cfg.Template.Dir)
-	if err != nil {
-		return fmt.Errorf("template loader: %w", err)
+	// ── Outbound scan traffic ───────────────────────────────
+	// One client for every worker. The SSRF guard validates the resolved IP at
+	// dial time and revalidates each redirect; the egress transport enforces the
+	// per-host rate limit. The per-scan request budget travels in the context,
+	// so no extra plumbing is needed here.
+	guardClient := guard.Client(time.Duration(cfg.Scanner.TimeoutSec)*time.Second, 5)
+	egressTransport := egress.NewTransport(egress.Config{
+		Base:          guardClient.Transport,
+		RatePerSecond: float64(envInt("SCAN_RATE_PER_SECOND", 5)),
+		Burst:         envInt("SCAN_RATE_BURST", 10),
+	})
+	scanClient := egressTransport.Client(time.Duration(cfg.Scanner.TimeoutSec) * time.Second)
+
+	scanDetector := detector.New(detector.DetectionConfig{
+		DefaultSeverity:      detector.SeverityInfo,
+		MaxPayloadsPerPlugin: envInt("SCAN_MAX_PAYLOADS_PER_PLUGIN", 20),
+		Timeout:              time.Duration(cfg.Scanner.TimeoutSec) * time.Second,
+		Client:               scanClient,
+	})
+	if err := scanDetector.LoadPlugins(); err != nil {
+		return fmt.Errorf("load detection plugins: %w", err)
 	}
+	log.Printf("loaded %d detection plugins", scanDetector.Registry().Len())
+
 	eventBus := event.NewBus()
 
 	engineCfg := scanner.EngineConfig{
 		ChromiumPath: cfg.Scanner.ChromiumPath,
 		TimeoutSec:   cfg.Scanner.TimeoutSec,
 	}
-	httpEngine := scanner.NewHTTPEngine(engineCfg)
+	httpEngine := scanner.NewHTTPEngine(engineCfg, scanDetector)
 	var headlessEngine *scanner.HeadlessEngine
 	if cfg.Scanner.HeadlessSize > 0 {
 		headlessEngine = scanner.NewHeadlessEngine(engineCfg)
@@ -138,52 +157,38 @@ func run() error {
 	defer cancel()
 	go sessionManager.Sweep(ctx)
 
-	useRabbitMQ := envBool("RABBITMQ_ENABLED", false)
-	var mqConn *messaging.Connection
-	if useRabbitMQ {
-		mqConfig := messaging.Config{
-			Host: cfg.RabbitMQ.Host, Port: cfg.RabbitMQ.Port,
-			User: cfg.RabbitMQ.User, Password: cfg.RabbitMQ.Password,
-			VHost: cfg.RabbitMQ.VHost, PrefetchCount: cfg.RabbitMQ.PrefetchCount,
-			Heartbeat: cfg.RabbitMQ.Heartbeat, ConnectionTimeout: cfg.RabbitMQ.ConnectionTimeout,
-			MaxRetries: cfg.RabbitMQ.MaxRetries, RetryDelayMS: cfg.RabbitMQ.RetryDelayMS,
-		}
-		mqConn = messaging.NewConnection(mqConfig)
-		if err := mqConn.Connect(); err != nil {
-			log.Printf("rabbitmq unavailable (%v), using in-memory queues", err)
-			useRabbitMQ = false
-			mqConn = nil
-		} else {
-			defer mqConn.Close()
-		}
+	// The messaging implementation is a stub: a task published to it is dropped
+	// without an error, so the mode is refused instead of producing scans that
+	// never run.
+	if envBool("RABBITMQ_ENABLED", false) {
+		return fmt.Errorf("RABBITMQ_ENABLED=true is not supported: the task publisher is not implemented, queued tasks would be dropped silently")
 	}
 
-	orchCfg := orchestrator.Config{
-		DB:             db,
-		TemplateLoader: templateLoader,
-		EventBus:       eventBus,
-		ScanRepo:       scanRepo,
-		FindingRepo:    findingRepo,
-	}
-	if mqConn != nil {
-		orchCfg.TaskPublisher = messaging.NewTaskPublisher(mqConn)
-		orchCfg.MessagingConfig = &orchestrator.ConfigMessaging{RabbitMQ: messaging.Config{}}
-	} else {
-		taskQueue := make(chan worker.Task, 1000)
-		resultQueue := make(chan worker.Result, 1000)
-		orchCfg.TaskQueue = taskQueue
-		orchCfg.ResultQueue = resultQueue
-		pool := worker.NewPool(ctx, cfg.Worker.Size, taskQueue, resultQueue, eventBus)
-		pool.WithEngines(httpEngine, headlessEngine).WithSessionManager(sessionManager)
-		pool.Start()
-		defer pool.Stop()
-	}
+	taskQueue := make(chan worker.Task, 1000)
+	resultQueue := make(chan worker.Result, 1000)
+	pool := worker.NewPool(ctx, cfg.Worker.Size, taskQueue, resultQueue, eventBus)
+	pool.WithEngines(httpEngine, headlessEngine).
+		WithSessionManager(sessionManager).
+		WithTimeout(time.Duration(cfg.Worker.TaskTimeout) * time.Second)
+	pool.Start()
+	defer pool.Stop()
 
-	orch := orchestrator.New(orchCfg)
+	orch := orchestrator.New(orchestrator.Config{
+		Registry:           scanDetector.Registry(),
+		TaskQueue:          taskQueue,
+		ResultQueue:        resultQueue,
+		EventBus:           eventBus,
+		ScanRepo:           scanRepo,
+		FindingRepo:        findingRepo,
+		MaxRequestsPerScan: int64(envInt("SCAN_MAX_REQUESTS_PER_SCAN", 0)),
+		RequestsPerTarget:  int64(envInt("SCAN_MAX_REQUESTS_PER_TARGET", 60)),
+	}).WithBaseContext(ctx)
 	orch.StartDispatchLoop(ctx)
+	defer orch.StopAll()
 
 	// ── Application services ────────────────────────────────
-	scanService := application.NewScanService(scanRepo, findingRepo, credRepo, guard, orchestratorDispatcher{orch: orch})
+	scanService := application.NewScanService(scanRepo, findingRepo, credRepo, guard, orchestratorDispatcher{orch: orch}).
+		WithCatalog(registryCatalog{reg: scanDetector.Registry()})
 	ticketService := application.NewTicketService(ticketRepo, findingRepo, scanRepo)
 	authService := application.NewAuthService(userRepo)
 	credService := application.NewAuthCredentialService(credRepo, guard)
@@ -223,7 +228,7 @@ func run() error {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("SentinelScan listening on %s (rabbitmq=%v)", addr, useRabbitMQ)
+		log.Printf("SentinelScan listening on %s", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -248,6 +253,31 @@ func (d orchestratorDispatcher) StartScan(scanID uint, targets []string, selecto
 		return nil
 	}
 	return d.orch.StartScan(scanID, targets, selectors)
+}
+
+func (d orchestratorDispatcher) Cancel(scanID uint) bool {
+	if d.orch == nil {
+		return false
+	}
+	return d.orch.Cancel(scanID)
+}
+
+// registryCatalog adapts the plugin registry to application.TemplateCatalog.
+type registryCatalog struct{ reg *detector.Registry }
+
+func (c registryCatalog) ResolveIDs(selectors string) ([]string, error) {
+	if c.reg == nil {
+		return nil, nil
+	}
+	plugins, err := c.reg.Resolve(selectors)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(plugins))
+	for i, p := range plugins {
+		ids[i] = p.Metadata.ID
+	}
+	return ids, nil
 }
 
 func newAuthMiddleware() (*middleware.Auth, error) {

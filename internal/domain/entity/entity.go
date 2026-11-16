@@ -13,15 +13,18 @@ const (
 )
 
 type ScanJob struct {
-	ID                uint              `json:"id"`
-	CreatedBy         uint              `json:"created_by"`
-	Targets           []string          `json:"targets"`
-	TemplateSelectors string            `json:"template_selectors"`
-	Status            ScanStatus        `json:"status"`
-	Progress          *ScanProgress     `json:"progress,omitempty"`
-	AuthCredentialID  *uint             `json:"auth_credential_id,omitempty"`
-	CreatedAt         time.Time         `json:"created_at"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	ID                uint       `json:"id"`
+	CreatedBy         uint       `json:"created_by"`
+	Targets           []string   `json:"targets"`
+	TemplateSelectors string     `json:"template_selectors"`
+	Status            ScanStatus `json:"status"`
+	// Truncated reports that the scan stopped early because it hit its request
+	// budget. A truncated report is partial by design and must say so.
+	Truncated        bool          `json:"truncated"`
+	Progress         *ScanProgress `json:"progress,omitempty"`
+	AuthCredentialID *uint         `json:"auth_credential_id,omitempty"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
 }
 
 type ScanProgress struct {
@@ -32,14 +35,14 @@ type ScanProgress struct {
 }
 
 type Finding struct {
-	ID         uint                 `json:"id"`
-	ScanID     uint                 `json:"scan_id"`
-	Target     string               `json:"target"`
-	TemplateID string               `json:"template_id"`
-	Matched    bool                 `json:"matched"`
-	Severity   string               `json:"severity"`
+	ID         uint                   `json:"id"`
+	ScanID     uint                   `json:"scan_id"`
+	Target     string                 `json:"target"`
+	TemplateID string                 `json:"template_id"`
+	Matched    bool                   `json:"matched"`
+	Severity   string                 `json:"severity"`
 	Details    map[string]interface{} `json:"details,omitempty"`
-	CreatedAt  time.Time            `json:"created_at"`
+	CreatedAt  time.Time              `json:"created_at"`
 }
 
 type TemplateFilter struct {
@@ -69,15 +72,15 @@ type Ticket struct {
 }
 
 type User struct {
-	ID           uint      `json:"id"`
-	Username     string    `json:"username"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	Role         Role      `json:"role"`
-	IsActive     bool      `json:"is_active"`
+	ID           uint       `json:"id"`
+	Username     string     `json:"username"`
+	Email        string     `json:"email"`
+	PasswordHash string     `json:"-"`
+	Role         Role       `json:"role"`
+	IsActive     bool       `json:"is_active"`
 	LastLogin    *time.Time `json:"last_login,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type Role string
@@ -96,7 +99,7 @@ const (
 	PermScanRead       Permission = "scan:read"
 	PermScanCancel     Permission = "scan:cancel"
 	PermCredCreate     Permission = "credential:create" // #nosec G101 -- permission identifier, not a secret
-	PermCredRead       Permission = "credential:read" // #nosec G101 -- permission identifier, not a secret
+	PermCredRead       Permission = "credential:read"   // #nosec G101 -- permission identifier, not a secret
 	PermCredUpdate     Permission = "credential:update" // #nosec G101 -- permission identifier, not a secret
 	PermCredDelete     Permission = "credential:delete" // #nosec G101 -- permission identifier, not a secret
 	PermCredVerify     Permission = "credential:verify" // #nosec G101 -- permission identifier, not a secret
@@ -119,34 +122,34 @@ const (
 )
 
 type AuthCredential struct {
-	ID            uint                 `json:"id"`
-	UserID        uint                 `json:"user_id"`
-	Name          string               `json:"name"`
-	Method        AuthMethod           `json:"method"`
+	ID            uint                   `json:"id"`
+	UserID        uint                   `json:"user_id"`
+	Name          string                 `json:"name"`
+	Method        AuthMethod             `json:"method"`
 	Config        map[string]interface{} `json:"config"`
-	LoginURL      string               `json:"login_url,omitempty"`
-	VerifyURL     string               `json:"verify_url,omitempty"`
-	VerifyPattern string               `json:"verify_pattern,omitempty"`
-	IsActive      bool                 `json:"is_active"`
-	LastVerified  *time.Time           `json:"last_verified,omitempty"`
-	CreatedAt     time.Time            `json:"created_at"`
-	UpdatedAt     time.Time            `json:"updated_at"`
+	LoginURL      string                 `json:"login_url,omitempty"`
+	VerifyURL     string                 `json:"verify_url,omitempty"`
+	VerifyPattern string                 `json:"verify_pattern,omitempty"`
+	IsActive      bool                   `json:"is_active"`
+	LastVerified  *time.Time             `json:"last_verified,omitempty"`
+	CreatedAt     time.Time              `json:"created_at"`
+	UpdatedAt     time.Time              `json:"updated_at"`
 }
 
 type AuthSession struct {
-	CredentialID   uint
-	Cookies        []map[string]string
-	Headers        map[string]string
-	LastVerified   time.Time
-	ExpiresAt      time.Time
-	HealthOK       bool
-	FailureCount   int
+	CredentialID uint
+	Cookies      []map[string]string
+	Headers      map[string]string
+	LastVerified time.Time
+	ExpiresAt    time.Time
+	HealthOK     bool
+	FailureCount int
 }
 
 type ScanReportData struct {
-	Scan     *ScanJob   `json:"scan"`
+	Scan     *ScanJob       `json:"scan"`
 	Summary  *ReportSummary `json:"summary"`
-	Findings []*Finding `json:"findings"`
+	Findings []*Finding     `json:"findings"`
 }
 
 type ReportSummary struct {

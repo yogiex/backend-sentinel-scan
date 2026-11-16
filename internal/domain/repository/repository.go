@@ -15,6 +15,8 @@ type ScanRepository interface {
 	FindByIDOwned(ctx context.Context, id, ownerID uint) (*entity.ScanJob, error)
 	UpdateStatus(ctx context.Context, id uint, status entity.ScanStatus) error
 	UpdateProgress(ctx context.Context, id uint, progress *entity.ScanProgress) error
+	// SetTruncated records that the scan stopped at its request budget.
+	SetTruncated(ctx context.Context, id uint) error
 	List(ctx context.Context, filter ScanFilter) ([]*entity.ScanJob, error)
 	Count(ctx context.Context, filter ScanFilter) (int64, error)
 	Delete(ctx context.Context, id uint) error

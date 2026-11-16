@@ -5,13 +5,16 @@ import "time"
 type ProviderType string
 
 const (
-	ProviderLink      ProviderType = "link"
+	ProviderLink       ProviderType = "link"
 	ProviderBruteForce ProviderType = "bruteforce"
 )
 
 type CrawlConfig struct {
 	Link       LinkConfig
 	BruteForce BruteForceConfig
+	// Client, when set, is used by every fetcher the crawler creates. Production
+	// callers pass the SSRF-guarded, budget-aware client.
+	Client HTTPClient
 }
 
 type LinkConfig struct {
@@ -39,7 +42,7 @@ type BruteForceConfig struct {
 type ScopeRule int
 
 const (
-	ScopeStrict       ScopeRule = iota
+	ScopeStrict ScopeRule = iota
 	ScopeSameDomain
 	ScopePathPrefix
 	ScopeUnrestricted
