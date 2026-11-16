@@ -2,8 +2,10 @@
 
 > A high-performance vulnerability scanning engine powered by Nuclei templates, with credential vault and on-demand PDF reporting.
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.25.10+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> Perubahan terbaru: lihat [CHANGELOG.md](CHANGELOG.md).
 
 ## Overview
 
