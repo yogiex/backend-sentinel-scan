@@ -24,12 +24,13 @@ jobs:
 
       - run: go mod download
 
+      - name: Install golangci-lint
+        # Build from source with the module's own toolchain: the prebuilt
+        # v1.64 binary is compiled with Go 1.24 and refuses a go1.25 module.
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+
       - name: golangci-lint (gosec + staticcheck + govet)
-        uses: golangci/golangci-lint-action@v6
-        with:
-          # v1.64.x is the last v1 release built with Go 1.25 support.
-          version: v1.64.8
-          args: --timeout=8m
+        run: $(go env GOPATH)/bin/golangci-lint run --timeout=8m
 
       - name: Secret scan — gitleaks
         uses: gitleaks/gitleaks-action@v2
@@ -54,8 +55,8 @@ jobs:
         with:
           scan-args: |-
             -r
-            --skip-git=true
-            ./go.mod
+            --skip-git
+            ./
 
   test:
     name: Build, vet & unit tests
