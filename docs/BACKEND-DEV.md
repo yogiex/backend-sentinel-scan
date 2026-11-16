@@ -134,3 +134,27 @@ Chromium, dan `gofmt` untuk file lama yang tak tersentuh.
 4. Migrasi ber-versi (golang-migrate) menggantikan `AutoMigrate`.
 5. Perbaiki test yang tidak dapat dikompilasi (`messaging_test.go`,
    `websocket_test.go`, `user_repository_test.go`, `headless_engine_test.go`).
+
+## 8. Utang keamanan: CVE dependensi (per 2026-11-16)
+
+`osv-scanner` (advisory di CI) menemukan CVE *module-level* pada:
+
+| Modul | Versi | Perbaikan | Contoh advisory |
+|---|---|---|---|
+| `golang.org/x/crypto` | 0.51.0 | ≥ 0.56.0 | GO-2026-5023 (CVSS 10.0), GO-2026-6303/6354/6355 |
+| `golang.org/x/net` | 0.55.0 | ≥ 0.60.0 / 0.62.0 | GO-2026-6611/6617/6860 |
+| `golang.org/x/text` | 0.37.0 | ≥ 0.39.0 / 0.41.0 | GO-2026-5970/6629 |
+
+Semua versi perbaikan menuntut `go >= 1.26`, jadi migrasinya satu paket:
+
+1. Naikkan `go.mod` ke `go 1.26.0` (+ `toolchain go1.26.x`).
+2. `go get golang.org/x/{crypto,net,text,sys,sync}@latest`.
+3. Migrasikan `.golangci.yml` ke skema golangci-lint **v2** (v1.64 dibangun
+   dengan Go 1.25 sehingga menolak menganalisis modul `go 1.26`), lalu ganti
+   langkah install lint di CI.
+4. CI ikut otomatis karena memakai `go-version-file: go.mod`.
+
+Catatan penting: ini temuan *module-level*, bukan bukti eksploitasi. Dari
+`golang.org/x/crypto` kode ini hanya mengimpor `bcrypt`, sehingga permukaan
+serangannya jauh lebih kecil daripada daftar advisory. Tetap harus dinaikkan
+sebelum rilis.
