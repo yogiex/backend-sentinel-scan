@@ -1,185 +1,306 @@
 package postgres
 
 import (
-	"context"
+	"encoding/json"
 	"time"
 
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 )
 
-// ── GORM Models ──────────────────────────────────────────────
+// ── GORM models (source of truth for the schema) ─────────────
+//
+// Progress is stored as integer columns rather than JSONB: workers increment
+// it concurrently and a read-modify-write on JSONB would lose updates.
 
 type ScanJob struct {
 	gorm.Model
-	Targets           datatypes.JSON `gorm:"type:jsonb"`
+	CreatedBy         uint           `gorm:"not null;index"`
+	Targets           datatypes.JSON `gorm:"type:jsonb;not null"`
 	TemplateSelectors datatypes.JSON `gorm:"type:jsonb"`
-	Status            string         `gorm:"default:pending"`
-	CreatedBy         uint
-	Progress          datatypes.JSON `gorm:"type:jsonb"`
-	AuthCredentialID  *uint
+	Status            string         `gorm:"type:varchar(20);not null;default:pending;index"`
+	TotalTasks        int            `gorm:"not null;default:0"`
+	CompletedTasks    int            `gorm:"not null;default:0"`
+	FailedTasks       int            `gorm:"not null;default:0"`
+	InProgressTasks   int            `gorm:"not null;default:0"`
+	AuthCredentialID  *uint          `gorm:"index"`
 }
 
 type Finding struct {
 	gorm.Model
-	ScanID     uint           `gorm:"index"`
-	Target     string
-	TemplateID string
-	Matched    bool
-	Severity   string
+	ScanID     uint           `gorm:"not null;index"`
+	Target     string         `gorm:"type:text;not null"`
+	TemplateID string         `gorm:"type:text;not null"`
+	Matched    bool           `gorm:"not null;default:false"`
+	Severity   string         `gorm:"type:varchar(20);not null;default:info;index"`
 	Details    datatypes.JSON `gorm:"type:jsonb"`
 }
 
 type Ticket struct {
 	gorm.Model
-	CreatedBy   uint
-	AssignedTo  *uint
-	ScanID      uint
-	Title       string
-	Description string
-	Severity    string
-	Status      string `gorm:"default:open"`
+	CreatedBy   uint   `gorm:"not null;index"`
+	AssignedTo  *uint  `gorm:"index"`
+	ScanID      uint   `gorm:"index"`
+	FindingID   uint   `gorm:"index"`
+	Title       string `gorm:"type:varchar(200);not null"`
+	Description string `gorm:"type:text"`
+	Severity    string `gorm:"type:varchar(20);default:info"`
+	Status      string `gorm:"type:varchar(20);not null;default:open;index"`
 }
 
 type User struct {
 	gorm.Model
-	Username     string `gorm:"uniqueIndex"`
-	Email        string `gorm:"uniqueIndex"`
-	PasswordHash string
-	Role         string `gorm:"default:viewer"`
+	Username     string `gorm:"type:varchar(64);uniqueIndex;not null"`
+	Email        string `gorm:"type:varchar(255);uniqueIndex;not null"`
+	PasswordHash string `gorm:"type:text;not null"`
+	Role         string `gorm:"type:varchar(32);not null;default:viewer"`
 	Permissions  datatypes.JSON
-	FirstName    string
-	LastName     string
-	IsActive     bool `gorm:"default:true"`
+	FirstName    string `gorm:"type:varchar(100)"`
+	LastName     string `gorm:"type:varchar(100)"`
+	IsActive     bool   `gorm:"not null;default:true"`
 	LastLogin    *time.Time
 }
 
 type AuditLog struct {
 	gorm.Model
-	UserID   uint
-	Level    string
-	Category string
-	Action   string
-	Message  string
+	UserID   uint           `gorm:"index"`
+	Level    string         `gorm:"type:varchar(20)"`
+	Category string         `gorm:"type:varchar(50);index"`
+	Action   string         `gorm:"type:varchar(100)"`
+	Message  string         `gorm:"type:text"`
 	Metadata datatypes.JSON `gorm:"type:jsonb"`
 }
 
 type AuthCredential struct {
 	gorm.Model
-	UserID        uint
-	Name          string
-	Method        string
+	UserID        uint           `gorm:"not null;index"`
+	Name          string         `gorm:"type:varchar(100);not null"`
+	Method        string         `gorm:"type:varchar(32)"`
 	Config        datatypes.JSON `gorm:"type:jsonb"`
-	LoginURL      string
-	VerifyURL     string
-	VerifyPattern string
-	IsActive      bool `gorm:"default:true"`
+	LoginURL      string         `gorm:"type:text"`
+	VerifyURL     string         `gorm:"type:text"`
+	VerifyPattern string         `gorm:"type:text"`
+	IsActive      bool           `gorm:"not null;default:true"`
 	LastVerified  *time.Time
 }
 
 type AuthSessionModel struct {
 	gorm.Model
-	ScanID         uint `gorm:"uniqueIndex"`
-	CredentialID   uint
-	Cookies        datatypes.JSON `gorm:"type:jsonb"`
-	Headers        datatypes.JSON `gorm:"type:jsonb"`
-	IsAuthenticated bool
+	ScanID          uint           `gorm:"uniqueIndex;not null"`
+	CredentialID    uint           `gorm:"index"`
+	Cookies         datatypes.JSON `gorm:"type:jsonb"`
+	Headers         datatypes.JSON `gorm:"type:jsonb"`
+	IsAuthenticated bool           `gorm:"not null;default:false"`
+	LastVerified    *time.Time
+	ExpiresAt       *time.Time
+	HealthOK        bool `gorm:"not null;default:false"`
+	FailureCount    int  `gorm:"not null;default:0"`
 }
 
-// ── Repository Implementations ──────────────────────────────
+// ── JSON helpers ────────────────────────────────────────────
 
-type ScanRepository struct{ db *gorm.DB }
-
-func NewScanRepository(db *gorm.DB) repository.ScanRepository {
-	return &ScanRepository{db: db}
-}
-
-func (r *ScanRepository) Create(ctx context.Context, scan *entity.ScanJob) error { return nil }
-func (r *ScanRepository) FindByID(ctx context.Context, id uint) (*entity.ScanJob, error) {
-	return &entity.ScanJob{ID: id, Status: entity.ScanStatusCompleted}, nil
-}
-func (r *ScanRepository) Update(ctx context.Context, scan *entity.ScanJob) error { return nil }
-func (r *ScanRepository) UpdateStatus(ctx context.Context, id uint, status entity.ScanStatus) error {
-	return nil
-}
-func (r *ScanRepository) UpdateProgress(ctx context.Context, id uint, progress *entity.ScanProgress) error {
-	return nil
-}
-func (r *ScanRepository) List(ctx context.Context, filter repository.ScanFilter) ([]*entity.ScanJob, error) {
-	return []*entity.ScanJob{}, nil
-}
-func (r *ScanRepository) Delete(ctx context.Context, id uint) error { return nil }
-
-type FindingRepository struct{ db *gorm.DB }
-
-func NewFindingRepository(db *gorm.DB) repository.FindingRepository {
-	return &FindingRepository{db: db}
-}
-func (r *FindingRepository) Create(ctx context.Context, finding *entity.Finding) error { return nil }
-func (r *FindingRepository) CreateBatch(ctx context.Context, findings []*entity.Finding) error {
-	return nil
-}
-func (r *FindingRepository) FindByScanID(ctx context.Context, scanID uint) ([]*entity.Finding, error) {
-	return []*entity.Finding{}, nil
-}
-func (r *FindingRepository) FindByID(ctx context.Context, id uint) (*entity.Finding, error) {
-	return &entity.Finding{ID: id}, nil
+func encodeJSON(v any) datatypes.JSON {
+	if v == nil {
+		return datatypes.JSON([]byte("null"))
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return datatypes.JSON([]byte("null"))
+	}
+	return datatypes.JSON(b)
 }
 
-type TicketRepository struct{ db *gorm.DB }
-
-func NewTicketRepository(db *gorm.DB) repository.TicketRepository {
-	return &TicketRepository{db: db}
-}
-func (r *TicketRepository) Create(ctx context.Context, ticket *entity.Ticket) error { return nil }
-func (r *TicketRepository) Update(ctx context.Context, ticket *entity.Ticket) error { return nil }
-func (r *TicketRepository) FindByID(ctx context.Context, id uint) (*entity.Ticket, error) {
-	return &entity.Ticket{ID: id}, nil
-}
-func (r *TicketRepository) List(ctx context.Context, filter repository.TicketFilter) ([]*entity.Ticket, error) {
-	return []*entity.Ticket{}, nil
+func encodeString(s string) datatypes.JSON {
+	b, _ := json.Marshal(s)
+	return datatypes.JSON(b)
 }
 
-type UserRepository struct{ db *gorm.DB }
-
-func NewUserRepository(db *gorm.DB) repository.UserRepository {
-	return &UserRepository{db: db}
-}
-func (r *UserRepository) Create(ctx context.Context, user *entity.User) error { return nil }
-func (r *UserRepository) FindByID(ctx context.Context, id uint) (*entity.User, error) {
-	return &entity.User{ID: id, Username: "admin", Role: entity.RoleAdmin}, nil
-}
-func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*entity.User, error) {
-	return &entity.User{ID: 1, Username: username, Role: entity.RoleAdmin}, nil
-}
-func (r *UserRepository) Update(ctx context.Context, user *entity.User) error { return nil }
-
-type AuditLogRepository struct{ db *gorm.DB }
-
-func NewAuditLogRepository(db *gorm.DB) repository.AuditLogRepository {
-	return &AuditLogRepository{db: db}
-}
-func (r *AuditLogRepository) Create(ctx context.Context, log *repository.AuditLogEntry) error {
-	return nil
+func decodeString(raw datatypes.JSON) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
-type AuthCredentialRepository struct{ db *gorm.DB }
+func decodeStrings(raw datatypes.JSON) []string {
+	if len(raw) == 0 {
+		return []string{}
+	}
+	var out []string
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return []string{}
+	}
+	return out
+}
 
-func NewAuthCredentialRepository(db *gorm.DB) repository.AuthCredentialRepository {
-	return &AuthCredentialRepository{db: db}
+func decodeMap(raw datatypes.JSON) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
 }
-func (r *AuthCredentialRepository) Create(ctx context.Context, cred *entity.AuthCredential) error {
-	return nil
+
+// ── Entity mapping ──────────────────────────────────────────
+
+func (m *ScanJob) toEntity() *entity.ScanJob {
+	return &entity.ScanJob{
+		ID:                m.ID,
+		CreatedBy:         m.CreatedBy,
+		Targets:           decodeStrings(m.Targets),
+		TemplateSelectors: decodeString(m.TemplateSelectors),
+		Status:            entity.ScanStatus(m.Status),
+		Progress: &entity.ScanProgress{
+			TotalTasks: m.TotalTasks,
+			Completed:  m.CompletedTasks,
+			Failed:     m.FailedTasks,
+			InProgress: m.InProgressTasks,
+		},
+		AuthCredentialID: m.AuthCredentialID,
+		CreatedAt:        m.CreatedAt,
+		UpdatedAt:        m.UpdatedAt,
+	}
 }
-func (r *AuthCredentialRepository) FindByID(ctx context.Context, id uint) (*entity.AuthCredential, error) {
-	return &entity.AuthCredential{ID: id}, nil
+
+func scanFromEntity(e *entity.ScanJob) *ScanJob {
+	status := string(e.Status)
+	if status == "" {
+		status = string(entity.ScanStatusPending)
+	}
+	m := &ScanJob{
+		CreatedBy:         e.CreatedBy,
+		Targets:           encodeJSON(nonNilStrings(e.Targets)),
+		TemplateSelectors: encodeString(e.TemplateSelectors),
+		Status:            status,
+		AuthCredentialID:  e.AuthCredentialID,
+	}
+	if e.Progress != nil {
+		m.TotalTasks = e.Progress.TotalTasks
+		m.CompletedTasks = e.Progress.Completed
+		m.FailedTasks = e.Progress.Failed
+		m.InProgressTasks = e.Progress.InProgress
+	}
+	if !e.CreatedAt.IsZero() {
+		m.CreatedAt = e.CreatedAt
+	}
+	return m
 }
-func (r *AuthCredentialRepository) FindByUserID(ctx context.Context, userID uint) ([]*entity.AuthCredential, error) {
-	return []*entity.AuthCredential{}, nil
+
+func (m *Finding) toEntity() *entity.Finding {
+	return &entity.Finding{
+		ID:         m.ID,
+		ScanID:     m.ScanID,
+		Target:     m.Target,
+		TemplateID: m.TemplateID,
+		Matched:    m.Matched,
+		Severity:   m.Severity,
+		Details:    decodeMap(m.Details),
+		CreatedAt:  m.CreatedAt,
+	}
 }
-func (r *AuthCredentialRepository) Update(ctx context.Context, cred *entity.AuthCredential) error {
-	return nil
+
+func findingFromEntity(e *entity.Finding) *Finding {
+	severity := e.Severity
+	if severity == "" {
+		severity = "info"
+	}
+	return &Finding{
+		ScanID:     e.ScanID,
+		Target:     e.Target,
+		TemplateID: e.TemplateID,
+		Matched:    e.Matched,
+		Severity:   severity,
+		Details:    encodeJSON(e.Details),
+	}
 }
-func (r *AuthCredentialRepository) Delete(ctx context.Context, id uint) error { return nil }
+
+func (m *Ticket) toEntity() *entity.Ticket {
+	return &entity.Ticket{
+		ID:          m.ID,
+		CreatedBy:   m.CreatedBy,
+		AssignedTo:  m.AssignedTo,
+		FindingID:   m.FindingID,
+		Title:       m.Title,
+		Description: m.Description,
+		Severity:    m.Severity,
+		Status:      entity.TicketStatus(m.Status),
+		CreatedAt:   m.CreatedAt,
+		UpdatedAt:   m.UpdatedAt,
+	}
+}
+
+func (m *User) toEntity() *entity.User {
+	return &entity.User{
+		ID:           m.ID,
+		Username:     m.Username,
+		Email:        m.Email,
+		PasswordHash: m.PasswordHash,
+		Role:         entity.Role(m.Role),
+		IsActive:     m.IsActive,
+		LastLogin:    m.LastLogin,
+		CreatedAt:    m.CreatedAt,
+		UpdatedAt:    m.UpdatedAt,
+	}
+}
+
+func userFromEntity(e *entity.User) *User {
+	role := string(e.Role)
+	if role == "" {
+		role = string(entity.RoleViewer)
+	}
+	return &User{
+		Username:     e.Username,
+		Email:        e.Email,
+		PasswordHash: e.PasswordHash,
+		Role:         role,
+		IsActive:     e.IsActive,
+		LastLogin:    e.LastLogin,
+	}
+}
+
+func (m *AuthCredential) toEntity() *entity.AuthCredential {
+	return &entity.AuthCredential{
+		ID:            m.ID,
+		UserID:        m.UserID,
+		Name:          m.Name,
+		Method:        entity.AuthMethod(m.Method),
+		Config:        decodeMap(m.Config),
+		LoginURL:      m.LoginURL,
+		VerifyURL:     m.VerifyURL,
+		VerifyPattern: m.VerifyPattern,
+		IsActive:      m.IsActive,
+		LastVerified:  m.LastVerified,
+		CreatedAt:     m.CreatedAt,
+		UpdatedAt:     m.UpdatedAt,
+	}
+}
+
+func credentialFromEntity(e *entity.AuthCredential) *AuthCredential {
+	return &AuthCredential{
+		UserID:        e.UserID,
+		Name:          e.Name,
+		Method:        string(e.Method),
+		Config:        encodeJSON(e.Config),
+		LoginURL:      e.LoginURL,
+		VerifyURL:     e.VerifyURL,
+		VerifyPattern: e.VerifyPattern,
+		IsActive:      e.IsActive,
+		LastVerified:  e.LastVerified,
+	}
+}
+
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}

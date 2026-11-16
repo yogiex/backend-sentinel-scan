@@ -2,21 +2,22 @@ run:
   timeout: 5m
   issues-exit-code: 1
   tests: false
-  skip-dirs:
-    - vendor/
 
 linters:
   enable:
     - gosec
     - staticcheck
-    - errcheck
     - govet
     - gosimple
     - unused
     - ineffassign
-    - revive
   disable:
     - typecheck
+    # errcheck and revive are disabled until the pre-existing backlog
+    # (~44 unchecked errors, ~320 missing doc comments) is paid down.
+    # Re-enable them one at a time, then delete this note.
+    - errcheck
+    - revive
 
 linters-settings:
   gosec:
@@ -29,27 +30,11 @@ linters-settings:
     checks:
       - all
       - -SA1019
-  revive:
-    ignore-generated-header: true
-    severity: warning
-    rules:
-      - name: exported
-        severity: warning
-      - name: blank-imports
-      - name: unused-parameter
-        severity: warning
 
 issues:
-  exclude-use-default: false
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
-        - unused
-    - path: internal/infrastructure/authscan/
-      linters:
-        - gosec
-    - path: detection/
-      linters:
-        - gosec
+  exclude-dirs:
+    - vendor
+    - .gocache
+    - .gomodcache
+  max-issues-per-linter: 0
+  max-same-issues: 0

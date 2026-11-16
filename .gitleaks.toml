@@ -1,0 +1,18 @@
+# Gitleaks configuration.
+#
+# The repository intentionally ships development credentials in the local
+# compose stack and sample config. They are not production secrets, so they are
+# allow-listed here; every other secret-shaped string still fails the scan.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local development defaults committed on purpose"
+paths = [
+  '''config\.yaml''',
+  '''docker-compose\.yml''',
+  '''deployments/\.env\.example''',
+  '''docs/.*\.md''',
+  '''README\.md''',
+]

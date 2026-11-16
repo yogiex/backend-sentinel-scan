@@ -7,10 +7,10 @@ import (
 type EventType string
 
 const (
-	EventTypeFinding   EventType = "finding"
-	EventTypeProgress  EventType = "progress"
-	EventTypeComplete  EventType = "complete"
-	EventTypeFailed    EventType = "failed"
+	EventTypeFinding  EventType = "finding"
+	EventTypeProgress EventType = "progress"
+	EventTypeComplete EventType = "complete"
+	EventTypeFailed   EventType = "failed"
 )
 
 type Event struct {
@@ -45,11 +45,16 @@ func (b *Bus) Unsubscribe(scanID string, ch chan Event) {
 	subs := b.subscribers[scanID]
 	for i, sub := range subs {
 		if sub == ch {
-			b.subscribers[scanID] = append(subs[:i], subs[i+1:]...)
-			close(ch)
+			subs = append(subs[:i], subs[i+1:]...)
 			break
 		}
 	}
+	if len(subs) == 0 {
+		delete(b.subscribers, scanID)
+	} else {
+		b.subscribers[scanID] = subs
+	}
+	close(ch)
 }
 
 func (b *Bus) Publish(scanID string, event Event) {

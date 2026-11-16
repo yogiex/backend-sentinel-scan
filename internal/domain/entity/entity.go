@@ -95,11 +95,11 @@ const (
 	PermScanCreate     Permission = "scan:create"
 	PermScanRead       Permission = "scan:read"
 	PermScanCancel     Permission = "scan:cancel"
-	PermCredCreate     Permission = "credential:create"
-	PermCredRead       Permission = "credential:read"
-	PermCredUpdate     Permission = "credential:update"
-	PermCredDelete     Permission = "credential:delete"
-	PermCredVerify     Permission = "credential:verify"
+	PermCredCreate     Permission = "credential:create" // #nosec G101 -- permission identifier, not a secret
+	PermCredRead       Permission = "credential:read" // #nosec G101 -- permission identifier, not a secret
+	PermCredUpdate     Permission = "credential:update" // #nosec G101 -- permission identifier, not a secret
+	PermCredDelete     Permission = "credential:delete" // #nosec G101 -- permission identifier, not a secret
+	PermCredVerify     Permission = "credential:verify" // #nosec G101 -- permission identifier, not a secret
 	PermTicketCreate   Permission = "ticket:create"
 	PermTicketUpdate   Permission = "ticket:update"
 	PermReportGenerate Permission = "report:generate"

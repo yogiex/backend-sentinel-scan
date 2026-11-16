@@ -47,3 +47,11 @@ coverage.html
 
 # Temp files from tests
 /test-templates/
+
+# Local build/module caches (used when HOME is not writable)
+/.gocache/
+/.gomodcache/
+
+# Credential encryption key material
+*.key
+/.lintcache/

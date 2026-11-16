@@ -6,13 +6,17 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 )
 
+// ScanRepository persists scan jobs. FindByID is unscoped and must only be
+// called after an authorisation check; FindByIDOwned enforces the ownership
+// rule inside the query (IDOR defence in depth).
 type ScanRepository interface {
 	Create(ctx context.Context, scan *entity.ScanJob) error
 	FindByID(ctx context.Context, id uint) (*entity.ScanJob, error)
-	Update(ctx context.Context, scan *entity.ScanJob) error
+	FindByIDOwned(ctx context.Context, id, ownerID uint) (*entity.ScanJob, error)
 	UpdateStatus(ctx context.Context, id uint, status entity.ScanStatus) error
 	UpdateProgress(ctx context.Context, id uint, progress *entity.ScanProgress) error
 	List(ctx context.Context, filter ScanFilter) ([]*entity.ScanJob, error)
+	Count(ctx context.Context, filter ScanFilter) (int64, error)
 	Delete(ctx context.Context, id uint) error
 }
 
@@ -27,6 +31,7 @@ type FindingRepository interface {
 	Create(ctx context.Context, finding *entity.Finding) error
 	CreateBatch(ctx context.Context, findings []*entity.Finding) error
 	FindByScanID(ctx context.Context, scanID uint) ([]*entity.Finding, error)
+	FindByScanIDLimit(ctx context.Context, scanID uint, limit int) ([]*entity.Finding, error)
 	FindByID(ctx context.Context, id uint) (*entity.Finding, error)
 }
 
@@ -58,19 +63,23 @@ type AuditLogRepository interface {
 }
 
 type AuditLogEntry struct {
-	ID        uint   `json:"id"`
-	UserID    uint   `json:"user_id"`
-	Level     string `json:"level"`
-	Category  string `json:"category"`
-	Action    string `json:"action"`
-	Message   string `json:"message"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	ID       uint           `json:"id"`
+	UserID   uint           `json:"user_id"`
+	Level    string         `json:"level"`
+	Category string         `json:"category"`
+	Action   string         `json:"action"`
+	Message  string         `json:"message"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
+// AuthCredentialRepository stores per-user secrets. Every method that reads or
+// writes a single credential is scoped by user ID.
 type AuthCredentialRepository interface {
 	Create(ctx context.Context, cred *entity.AuthCredential) error
 	FindByID(ctx context.Context, id uint) (*entity.AuthCredential, error)
+	FindByIDOwned(ctx context.Context, id, userID uint) (*entity.AuthCredential, error)
 	FindByUserID(ctx context.Context, userID uint) ([]*entity.AuthCredential, error)
 	Update(ctx context.Context, cred *entity.AuthCredential) error
-	Delete(ctx context.Context, id uint) error
+	DeleteOwned(ctx context.Context, id, userID uint) error
+	UpdateLastVerified(ctx context.Context, id uint) error
 }

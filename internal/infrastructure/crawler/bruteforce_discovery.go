@@ -46,14 +46,19 @@ func (d *BruteForceDiscovery) Start(ctx context.Context, seedURLs []string, resu
 	}
 
 	go func() {
+		defer close(workCh)
+	sendLoop:
 		for _, seed := range seedURLs {
 			base := strings.TrimRight(seed, "/")
 			for _, p := range paths {
 				fullURL := base + "/" + strings.TrimLeft(p, "/")
-				workCh <- bruteTask{URL: fullURL, Path: p}
+				select {
+				case workCh <- bruteTask{URL: fullURL, Path: p}:
+				case <-ctx.Done():
+					break sendLoop
+				}
 			}
 		}
-		close(workCh)
 	}()
 
 	wg.Wait()

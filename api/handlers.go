@@ -1,314 +1,280 @@
 package api
 
 import (
-	"context"
-	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
+
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/application"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/policy"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/authscan"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/messaging"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/report"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/orchestrator"
-	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/pkg/errors"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/httpx"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/middleware"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/ssrf"
 )
 
-// ScanServiceInterface defines the interface for scan operations.
-type ScanServiceInterface interface {
-	StartScan(ctx context.Context, createdBy uint, targets []string, filter entity.TemplateFilter) (*entity.ScanJob, error)
-	GetScan(ctx context.Context, id uint) (*entity.ScanJob, error)
-	CancelScan(ctx context.Context, id uint) error
-	GetProgress(ctx context.Context, id uint) (*entity.ScanProgress, error)
-	GetResults(ctx context.Context, scanID uint) ([]*entity.Finding, error)
-}
-
-// TicketServiceInterface defines the interface for ticket operations.
-type TicketServiceInterface interface {
-	CreateTicket(ctx context.Context, findingID uint, title, description, priority string, createdBy uint) (*entity.Ticket, error)
-	UpdateStatus(ctx context.Context, id uint, status entity.TicketStatus) error
-	AssignTicket(ctx context.Context, ticketID, userID uint) error
-	GetTickets(ctx context.Context, filter repository.TicketFilter) ([]*entity.Ticket, error)
-}
-
-// AuthServiceInterface defines the interface for auth operations.
-type AuthServiceInterface interface {
-	Authenticate(ctx context.Context, username, password string) (*entity.User, error)
-	HasPermission(ctx context.Context, userID uint, perm entity.Permission) (bool, error)
-	GetUserRoles(ctx context.Context, userID uint) ([]entity.Role, error)
-}
-
-// AuthCredentialServiceInterface defines the interface for auth credential CRUD.
-type AuthCredentialServiceInterface interface {
-	Create(ctx context.Context, userID uint, name string, method entity.AuthMethod, config map[string]interface{}, loginURL, verifyURL, verifyPattern string) (*entity.AuthCredential, error)
-	GetByID(ctx context.Context, id uint) (*entity.AuthCredential, error)
-	ListByUserID(ctx context.Context, userID uint) ([]*entity.AuthCredential, error)
-	Update(ctx context.Context, id uint, updates map[string]interface{}) (*entity.AuthCredential, error)
-	Delete(ctx context.Context, id uint) error
-	UpdateLastVerified(ctx context.Context, id uint) error
-	Sanitize(cred *entity.AuthCredential)
-}
-
-// AuthCredentialVerifyResponse represents the verification response.
-type AuthCredentialVerifyResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-	Cookies int    `json:"cookies"`
-	Headers int    `json:"headers"`
-}
-
-// ReportServiceInterface defines the interface for report operations.
-type ReportServiceInterface interface {
-	GetReportData(ctx context.Context, scanID uint) (*entity.ScanReportData, error)
-}
-
-// Handler handles HTTP requests using application services.
+// Handler wires HTTP routes to application services.
 type Handler struct {
-	scanService          ScanServiceInterface
-	ticketService        TicketServiceInterface
-	authService          AuthServiceInterface
-	authCredentialService AuthCredentialServiceInterface
-	orchestrator        *orchestrator.Orchestrator
-	eventConsumer       *messaging.EventConsumer
-	sessionManager      *authscan.SessionManager
-	reportService       ReportServiceInterface
-	reportGenerator     *report.Generator
+	scans      *application.ScanService
+	tickets    *application.TicketService
+	auth       *application.AuthService
+	creds      *application.AuthCredentialService
+	reports    *application.ReportService
+	guard      *ssrf.Guard
+	authIssuer *middleware.Auth
 }
 
-// NewHandler creates a new Handler with application services.
+// NewHandler builds the HTTP handler.
 func NewHandler(
-	scanService ScanServiceInterface,
-	ticketService TicketServiceInterface,
-	authService AuthServiceInterface,
-	authCredentialService AuthCredentialServiceInterface,
-	orchestrator *orchestrator.Orchestrator,
+	scans *application.ScanService,
+	tickets *application.TicketService,
+	auth *application.AuthService,
+	creds *application.AuthCredentialService,
+	reports *application.ReportService,
+	guard *ssrf.Guard,
 ) *Handler {
-	return &Handler{
-		scanService:          scanService,
-		ticketService:        ticketService,
-		authService:          authService,
-		authCredentialService: authCredentialService,
-		orchestrator:         orchestrator,
+	return &Handler{scans: scans, tickets: tickets, auth: auth, creds: creds, reports: reports, guard: guard}
+}
+
+// WithAuthIssuer enables the login endpoint.
+func (h *Handler) WithAuthIssuer(a *middleware.Auth) *Handler {
+	h.authIssuer = a
+	return h
+}
+
+// actor returns the authenticated principal or writes a 401.
+func actor(w http.ResponseWriter, r *http.Request) (policy.Actor, bool) {
+	a, ok := middleware.ActorFrom(r.Context())
+	if !ok {
+		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Authentication required")
+		return policy.Actor{}, false
 	}
+	return a, true
 }
 
-// WithReportService sets the report service and generator for report endpoints.
-func (h *Handler) WithReportService(rs ReportServiceInterface, rg *report.Generator) *Handler {
-	h.reportService = rs
-	h.reportGenerator = rg
-	return h
+func pathID(r *http.Request, name string) (uint, bool) {
+	raw := mux.Vars(r)[name]
+	id, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil || id == 0 {
+		return 0, false
+	}
+	return uint(id), true
 }
 
-// WithSessionManager sets the session manager for authenticated scanning.
-func (h *Handler) WithSessionManager(sm *authscan.SessionManager) *Handler {
-	h.sessionManager = sm
-	return h
+func queryInt(r *http.Request, name string, fallback int) int {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return v
 }
 
-// WithEventConsumer sets the event consumer for RabbitMQ-based WebSocket streaming.
-func (h *Handler) WithEventConsumer(ec *messaging.EventConsumer) *Handler {
-	h.eventConsumer = ec
-	return h
-}
+// ── Health ──────────────────────────────────────────────────
 
-// HealthResponse represents the health check response
 type HealthResponse struct {
 	Status    string `json:"status" example:"healthy"`
 	Version   string `json:"version,omitempty" example:"1.0.0"`
 	Timestamp string `json:"timestamp" example:"2026-05-11T10:00:00Z"`
 }
 
-// CreateScanRequest represents the request body for creating a new scan.
-type CreateScanRequest struct {
-	Targets           []string `json:"targets" example:"http://example.com,https://test.com"`
-	TemplateSelectors string   `json:"template_selectors" example:"{\"severity\":[\"high\",\"critical\"]}"`
-	AuthCredentialID  *uint    `json:"auth_credential_id,omitempty" example:"1"`
-}
-
-// HealthHandler handles health check requests
-// @Summary      Health check
-// @Description  Returns the health status of the API server
-// @Tags         System
-// @Produce      json
-// @Success      200 {object} HealthResponse
-// @Router       /health [get]
 func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
-	response := HealthResponse{
+	httpx.JSON(w, http.StatusOK, HealthResponse{
 		Status:    "healthy",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-	
-	// TODO: Add version from build flags
-	// response.Version = Version
-	
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-// CreateScan creates and starts a new vulnerability scan
-// @Summary      Create and start a vulnerability scan
-// @Description  Initiates a new scan against specified targets using Nuclei templates.
-// @Tags         Scans
-// @Accept       json
-// @Produce      json
-// @Param        request body CreateScanRequest true "Scan targets and template filters"
-// @Success      201 {object} entity.ScanJob
-// @Failure      400 {object} errors.AppError
-// @Failure      500 {object} errors.AppError
-// @Security     BearerAuth
-// @Router       /scans [post]
+// ── Auth ────────────────────────────────────────────────────
+
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type loginResponse struct {
+	Token     string       `json:"token"`
+	TokenType string       `json:"token_type"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	User      *userPayload `json:"user"`
+}
+
+type userPayload struct {
+	ID       uint        `json:"id"`
+	Username string      `json:"username"`
+	Email    string      `json:"email"`
+	Role     entity.Role `json:"role"`
+}
+
+// LoginHandler exchanges credentials for a bearer token.
+func (h *Handler) LoginHandler(w http.ResponseWriter, r *http.Request) {
+	if h.authIssuer == nil {
+		httpx.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Login is not configured")
+		return
+	}
+	var req loginRequest
+	if !httpx.Decode(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || req.Password == "" {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "username and password are required")
+		return
+	}
+	user, err := h.auth.Authenticate(r.Context(), req.Username, req.Password)
+	if err != nil {
+		// Uniform message: never reveal whether the account exists.
+		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid username or password")
+		return
+	}
+	token, expires, err := h.authIssuer.Issue(user)
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, loginResponse{
+		Token:     token,
+		TokenType: "Bearer",
+		ExpiresAt: expires,
+		User:      &userPayload{ID: user.ID, Username: user.Username, Email: user.Email, Role: user.Role},
+	})
+}
+
+// MeHandler returns the caller's profile.
+func (h *Handler) MeHandler(w http.ResponseWriter, r *http.Request) {
+	a, ok := actor(w, r)
+	if !ok {
+		return
+	}
+	user, err := h.auth.GetByID(r.Context(), a.ID)
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, userPayload{ID: user.ID, Username: user.Username, Email: user.Email, Role: user.Role})
+}
+
+// ── Scans ───────────────────────────────────────────────────
+
+type createScanRequest struct {
+	Targets           []string `json:"targets"`
+	TemplateSelectors string   `json:"template_selectors"`
+	AuthCredentialID  *uint    `json:"auth_credential_id,omitempty"`
+}
+
+// CreateScan validates and queues a scan. The response is 202: the scan has
+// been persisted but execution continues asynchronously.
 func (h *Handler) CreateScan(w http.ResponseWriter, r *http.Request) {
-	var req CreateScanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-
-	if len(req.Targets) == 0 {
-		http.Error(w, "Targets are required", http.StatusBadRequest)
+	var req createScanRequest
+	if !httpx.Decode(w, r, &req) {
 		return
 	}
-
-	// Get user ID from context (set by auth middleware)
-	createdBy := uint(1) // TODO: extract from JWT context
-
-	scan, err := h.scanService.StartScan(r.Context(), createdBy, req.Targets, entity.TemplateFilter{})
+	scan, err := h.scans.StartScan(r.Context(), a, req.Targets, req.TemplateSelectors, req.AuthCredentialID)
 	if err != nil {
-		appErr, ok := err.(*errors.AppError)
-		if ok {
-			http.Error(w, appErr.Message, appErr.Status)
-		} else {
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-		}
+		httpx.ErrorFrom(w, err)
 		return
 	}
-
-	if req.AuthCredentialID != nil {
-		scan.AuthCredentialID = req.AuthCredentialID
-
-		// Start authenticated session BEFORE orchestrator dispatch
-		if h.sessionManager != nil {
-			cred, credErr := h.authCredentialService.GetByID(r.Context(), *req.AuthCredentialID)
-			if credErr == nil {
-				_, sessErr := h.sessionManager.StartSession(r.Context(), scan.ID, cred)
-				if sessErr != nil {
-					log.Printf("[scan] failed to start auth session for scan %d: %v — scan will proceed unauthenticated", scan.ID, sessErr)
-				}
-			}
-		}
-	}
-
-	// Start scan in orchestrator (tasks will pick up session from sessionManager)
-	if h.orchestrator != nil {
-		if err := h.orchestrator.StartScan(scan.ID, req.Targets, req.TemplateSelectors); err != nil {
-			http.Error(w, "Failed to start scan", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(scan)
+	httpx.JSON(w, http.StatusAccepted, scan)
 }
 
-// GetScan returns scan status and details
-// @Summary      Get scan status and details
-// @Description  Retrieves the current status and metadata of a scan job by ID.
-// @Tags         Scans
-// @Produce      json
-// @Param        id path int true "Scan ID"
-// @Success      200 {object} entity.ScanJob
-// @Failure      404 {object} errors.AppError
-// @Failure      500 {object} errors.AppError
-// @Security     BearerAuth
-// @Router       /scans/{id} [get]
+type scanListResponse struct {
+	Items    []*entity.ScanJob `json:"items"`
+	Total    int64             `json:"total"`
+	Page     int               `json:"page"`
+	PageSize int               `json:"page_size"`
+}
+
+// ListScans returns the caller's scans (all scans for admins).
+func (h *Handler) ListScans(w http.ResponseWriter, r *http.Request) {
+	a, ok := actor(w, r)
+	if !ok {
+		return
+	}
+	page := queryInt(r, "page", 1)
+	pageSize := queryInt(r, "page_size", 20)
+	filter := repository.ScanFilter{
+		Status:   strings.TrimSpace(r.URL.Query().Get("status")),
+		Page:     page,
+		PageSize: pageSize,
+	}
+	items, total, err := h.scans.ListScans(r.Context(), a, filter)
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, scanListResponse{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
 func (h *Handler) GetScan(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
-	if err != nil {
-		http.Error(w, "Invalid scan ID", http.StatusBadRequest)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-
-	scan, err := h.scanService.GetScan(r.Context(), uint(id))
-	if err != nil {
-		appErr, ok := err.(*errors.AppError)
-		if ok {
-			http.Error(w, appErr.Message, appErr.Status)
-		} else {
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-		}
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid scan ID")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(scan)
+	scan, err := h.scans.GetScan(r.Context(), a, id)
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, scan)
 }
 
-// GetScanResults returns all findings for a scan
-// @Summary      Get scan findings
-// @Description  Retrieves all vulnerability findings detected during a scan.
-// @Tags         Scans
-// @Produce      json
-// @Param        id path int true "Scan ID"
-// @Success      200 {array} entity.Finding
-// @Failure      404 {object} errors.AppError
-// @Failure      500 {object} errors.AppError
-// @Security     BearerAuth
-// @Router       /scans/{id}/results [get]
+func (h *Handler) CancelScan(w http.ResponseWriter, r *http.Request) {
+	a, ok := actor(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid scan ID")
+		return
+	}
+	if err := h.scans.CancelScan(r.Context(), a, id); err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": string(entity.ScanStatusCancelled)})
+}
+
 func (h *Handler) GetScanResults(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
-	if err != nil {
-		http.Error(w, "Invalid scan ID", http.StatusBadRequest)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-
-	findings, err := h.scanService.GetResults(r.Context(), uint(id))
-	if err != nil {
-		appErr, ok := err.(*errors.AppError)
-		if ok {
-			http.Error(w, appErr.Message, appErr.Status)
-		} else {
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-		}
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid scan ID")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(findings)
+	findings, err := h.scans.GetResults(r.Context(), a, id, queryInt(r, "limit", 0))
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, findings)
 }
 
-// ListTemplates lists available Nuclei templates
-// @Summary      List available Nuclei templates
-// @Description  Returns a list of available Nuclei templates, optionally filtered by severity or tags.
-// @Tags         Templates
-// @Produce      json
-// @Param        severity query string false "Filter by severity (comma-separated: info,low,medium,high,critical)"
-// @Param        tags query string false "Filter by tags (comma-separated)"
-// @Success      200 {array} string
-// @Security     BearerAuth
-// @Router       /templates [get]
+// ── Templates ───────────────────────────────────────────────
+
+// ListTemplates is a placeholder until the template registry is wired.
 func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode([]string{})
+	httpx.JSON(w, http.StatusOK, []string{})
 }
 
-// GetTemplate returns template details
-// @Summary      Get template details
-// @Description  Returns details of a specific Nuclei template by ID.
-// @Tags         Templates
-// @Produce      json
-// @Param        id path string true "Template ID"
-// @Success      200 {object} object
-// @Security     BearerAuth
-// @Router       /templates/{id} [get]
 func (h *Handler) GetTemplate(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{})
+	httpx.Error(w, http.StatusNotFound, "NOT_FOUND", "Template not found")
 }

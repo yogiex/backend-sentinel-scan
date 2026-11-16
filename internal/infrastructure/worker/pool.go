@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/authscan"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
@@ -189,7 +190,9 @@ func (p *Pool) executeTask(task Task) Result {
 		Engine:     scanner.EngineHTTP,
 		Session:    task.Session,
 	}
-	result := p.httpEngine.Execute(context.Background(), scanTask)
+	execCtx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
+	defer cancel()
+	result := p.httpEngine.Execute(execCtx, scanTask)
 	workerFinding := &Finding{
 		Target:     task.Target,
 		TemplateID: task.TemplateID,

@@ -1,187 +1,208 @@
 package api
 
 import (
-	"encoding/json"
+	"io"
 	"net/http"
-	"strconv"
+	"strings"
+	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/httpx"
 )
 
-// StreamHandler handles WebSocket connections for scan streaming.
+// StreamHandler will upgrade to a WebSocket once the event pipeline is wired.
+// It returns 501 instead of a fake success so clients can detect the gap.
 func (h *Handler) StreamHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-	json.NewEncoder(w).Encode(map[string]string{"error": "WebSocket not implemented"})
+	httpx.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "WebSocket streaming is not implemented yet")
 }
 
-// ListAuthCredentials returns all credentials for the current user.
+// ── Credentials ─────────────────────────────────────────────
+
+type createCredentialRequest struct {
+	Name          string         `json:"name"`
+	Method        string         `json:"method"`
+	Config        map[string]any `json:"config"`
+	LoginURL      string         `json:"login_url"`
+	VerifyURL     string         `json:"verify_url"`
+	VerifyPattern string         `json:"verify_pattern"`
+}
+
 func (h *Handler) ListAuthCredentials(w http.ResponseWriter, r *http.Request) {
-	if h.authCredentialService == nil {
-		http.Error(w, "credential service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	creds, err := h.authCredentialService.ListByUserID(r.Context(), 1)
+	creds, err := h.creds.List(r.Context(), a)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	json.NewEncoder(w).Encode(creds)
+	for _, c := range creds {
+		h.creds.Sanitize(c)
+	}
+	httpx.JSON(w, http.StatusOK, creds)
 }
 
-// CreateAuthCredential creates a new credential in the vault.
 func (h *Handler) CreateAuthCredential(w http.ResponseWriter, r *http.Request) {
-	if h.authCredentialService == nil {
-		http.Error(w, "credential service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	var req struct {
-		Name   string                 `json:"name"`
-		Method string                 `json:"method"`
-		Config map[string]interface{} `json:"config"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	var req createCredentialRequest
+	if !httpx.Decode(w, r, &req) {
 		return
 	}
-	cred, err := h.authCredentialService.Create(r.Context(), 1, req.Name, "", req.Config, "", "", "")
+	cred, err := h.creds.Create(r.Context(), a, req.Name, entity.AuthMethod(req.Method),
+		req.Config, req.LoginURL, req.VerifyURL, req.VerifyPattern)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(cred)
+	h.creds.Sanitize(cred)
+	httpx.JSON(w, http.StatusCreated, cred)
 }
 
-// GetAuthCredential returns a specific credential by ID.
 func (h *Handler) GetAuthCredential(w http.ResponseWriter, r *http.Request) {
-	if h.authCredentialService == nil {
-		http.Error(w, "credential service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid credential ID")
+		return
+	}
+	cred, err := h.creds.GetByID(r.Context(), a, id)
 	if err != nil {
-		http.Error(w, "Invalid credential ID", http.StatusBadRequest)
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	cred, err := h.authCredentialService.GetByID(r.Context(), uint(id))
-	if err != nil {
-		http.Error(w, "Credential not found", http.StatusNotFound)
-		return
-	}
-	json.NewEncoder(w).Encode(cred)
+	h.creds.Sanitize(cred)
+	httpx.JSON(w, http.StatusOK, cred)
 }
 
-// UpdateAuthCredential updates a credential.
 func (h *Handler) UpdateAuthCredential(w http.ResponseWriter, r *http.Request) {
-	if h.authCredentialService == nil {
-		http.Error(w, "credential service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid credential ID")
+		return
+	}
+	var updates map[string]any
+	if !httpx.Decode(w, r, &updates) {
+		return
+	}
+	cred, err := h.creds.Update(r.Context(), a, id, updates)
 	if err != nil {
-		http.Error(w, "Invalid credential ID", http.StatusBadRequest)
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	var updates map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	cred, err := h.authCredentialService.Update(r.Context(), uint(id), updates)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(cred)
+	h.creds.Sanitize(cred)
+	httpx.JSON(w, http.StatusOK, cred)
 }
 
-// DeleteAuthCredential deletes a credential.
 func (h *Handler) DeleteAuthCredential(w http.ResponseWriter, r *http.Request) {
-	if h.authCredentialService == nil {
-		http.Error(w, "credential service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
-	if err != nil {
-		http.Error(w, "Invalid credential ID", http.StatusBadRequest)
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid credential ID")
 		return
 	}
-	if err := h.authCredentialService.Delete(r.Context(), uint(id)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := h.creds.Delete(r.Context(), a, id); err != nil {
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.NoContent(w)
 }
 
-// VerifyAuthCredential verifies a credential against its target.
+type verifyResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Cookies int    `json:"cookies"`
+	Headers int    `json:"headers"`
+}
+
+// VerifyAuthCredential checks the configured verify URL through the SSRF-safe
+// client. It never follows the credential's login flow implicitly.
 func (h *Handler) VerifyAuthCredential(w http.ResponseWriter, r *http.Request) {
-	if h.authCredentialService == nil {
-		http.Error(w, "credential service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid credential ID")
+		return
+	}
+	cred, err := h.creds.GetByID(r.Context(), a, id)
 	if err != nil {
-		http.Error(w, "Invalid credential ID", http.StatusBadRequest)
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	if h.sessionManager == nil {
-		http.Error(w, "session manager not available", http.StatusInternalServerError)
+	if strings.TrimSpace(cred.VerifyURL) == "" {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Credential has no verify_url")
 		return
 	}
-	cred, err := h.authCredentialService.GetByID(r.Context(), uint(id))
+	if h.guard == nil {
+		httpx.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Verification is not configured")
+		return
+	}
+	if _, err := h.guard.Validate(r.Context(), cred.VerifyURL); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_TARGET", "verify_url rejected: "+err.Error())
+		return
+	}
+
+	client := h.guard.Client(15*time.Second, 3)
+	resp, err := client.Get(cred.VerifyURL) // #nosec G107 -- URL validated above and re-checked at dial time
 	if err != nil {
-		http.Error(w, "Credential not found", http.StatusNotFound)
+		httpx.JSON(w, http.StatusOK, verifyResponse{Status: "failed", Message: "request failed"})
 		return
 	}
-	session, sessErr := h.sessionManager.StartSession(r.Context(), 0, cred)
-	if sessErr != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(AuthCredentialVerifyResponse{
-			Status: "failed", Message: "Authentication failed",
-		})
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	matched := cred.VerifyPattern == "" || strings.Contains(string(body), cred.VerifyPattern)
+	if !matched {
+		httpx.JSON(w, http.StatusOK, verifyResponse{Status: "failed", Message: "verify pattern not found"})
 		return
 	}
-	json.NewEncoder(w).Encode(AuthCredentialVerifyResponse{
-		Status:  "verified",
-		Message: "Successfully authenticated",
-		Cookies: len(session.Cookies),
-		Headers: len(session.Headers),
-	})
+	if err := h.creds.UpdateLastVerified(r.Context(), a, id); err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, verifyResponse{Status: "verified", Message: "verify pattern matched"})
 }
 
-// GetReportData returns aggregated scan report data.
+// ── Reports ─────────────────────────────────────────────────
+
 func (h *Handler) GetReportData(w http.ResponseWriter, r *http.Request) {
-	if h.reportService == nil {
-		http.Error(w, "report service not available", http.StatusInternalServerError)
+	a, ok := actor(w, r)
+	if !ok {
 		return
 	}
-	vars := mux.Vars(r)
-	id, err := strconv.ParseUint(vars["id"], 10, 32)
+	id, ok := pathID(r, "id")
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid scan ID")
+		return
+	}
+	data, err := h.reports.GetReportData(r.Context(), a, id)
 	if err != nil {
-		http.Error(w, "Invalid scan ID", http.StatusBadRequest)
+		httpx.ErrorFrom(w, err)
 		return
 	}
-	data, err := h.reportService.GetReportData(r.Context(), uint(id))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(data)
+	httpx.JSON(w, http.StatusOK, data)
 }
 
-// ExportReport generates a PDF report.
 func (h *Handler) ExportReport(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-	json.NewEncoder(w).Encode(map[string]string{"status": "not_implemented"})
+	httpx.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Report export is not implemented yet")
 }
 
-// DownloadReport downloads a generated PDF report.
 func (h *Handler) DownloadReport(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-	json.NewEncoder(w).Encode(map[string]string{"status": "not_implemented"})
+	httpx.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Report download is not implemented yet")
 }

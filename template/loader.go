@@ -17,7 +17,7 @@ func NewLoader(templateDir string) (*Loader, error) {
 	_, err := os.Stat(templateDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := os.MkdirAll(templateDir, 0755); err != nil {
+			if err := os.MkdirAll(templateDir, 0750); err != nil {
 				return nil, fmt.Errorf("failed to create template dir: %w", err)
 			}
 		} else {

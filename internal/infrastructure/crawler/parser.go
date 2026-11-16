@@ -238,6 +238,11 @@ func resolveURL(href string, base *url.URL) string {
 	return resolved.String()
 }
 
+
+// filterLinksByScope keeps only links allowed by the crawl scope. It is
+// exercised by parser tests and kept for the discovery providers.
+//
+//nolint:unused // used by parser_test.go
 func filterLinksByScope(links []string, seedURLs []string, scope *ScopeFilter) []string {
 	if scope == nil {
 		return links

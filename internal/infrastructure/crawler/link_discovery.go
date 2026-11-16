@@ -56,7 +56,12 @@ func (d *LinkDiscovery) worker(ctx context.Context, workerWg, taskWg *sync.WaitG
 	for task := range tasks {
 		select {
 		case <-ctx.Done():
+			// Account for this task and drain what is still buffered, otherwise
+			// the closer goroutine (taskWg.Wait) blocks forever.
 			taskWg.Done()
+			for range tasks {
+				taskWg.Done()
+			}
 			return
 		default:
 		}
