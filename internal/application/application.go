@@ -35,9 +35,36 @@ type ScanDispatcher interface {
 
 // TemplateCatalog resolves template selectors at submission time, so a selector
 // that matches nothing is rejected with 400 instead of producing a scan that
-// never runs.
+// never runs. It also lists the templates this backend can actually execute.
 type TemplateCatalog interface {
 	ResolveIDs(selectors string) ([]string, error)
+	List() []TemplateSummary
+	Get(id string) (TemplateSummary, bool)
+}
+
+// TemplateSummary is the public description of one built-in detection plugin.
+//
+// It deliberately carries no Nuclei "content", category, or favourite flag:
+// those belong to a template store this backend does not have, and inventing
+// them would give the UI fields it cannot trust. What is here is what the
+// engine really runs.
+type TemplateSummary struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description,omitempty"`
+	Severity     string   `json:"severity"`
+	Engine       string   `json:"engine"`
+	Tags         []string `json:"tags"`
+	Reference    string   `json:"reference,omitempty"`
+	PayloadCount int      `json:"payload_count"`
+	Matchers     []string `json:"matchers"`
+}
+
+// TemplateFilter narrows a template listing. Empty fields mean "no filter".
+type TemplateFilter struct {
+	Severity []string
+	Tag      string
+	Search   string
 }
 
 // ── Scan ────────────────────────────────────────────────────
@@ -189,6 +216,78 @@ func (s *ScanService) GetResults(ctx context.Context, actor policy.Actor, id uin
 		limit = 500
 	}
 	return s.findings.FindByScanIDLimit(ctx, id, limit)
+}
+
+// ListTemplates returns the templates this backend can run. Filtering lives
+// here rather than in the registry so every caller sees the same behaviour.
+func (s *ScanService) ListTemplates(ctx context.Context, actor policy.Actor, filter TemplateFilter) ([]TemplateSummary, error) {
+	if !actor.Can(entity.PermScanRead) {
+		return nil, apperr.ErrForbidden
+	}
+	if s.catalog == nil {
+		return []TemplateSummary{}, nil
+	}
+	items := s.catalog.List()
+	out := make([]TemplateSummary, 0, len(items))
+	for _, item := range items {
+		if matchesTemplateFilter(item, filter) {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+// GetTemplate returns one template by id. A missing id is a 404, not a 500.
+func (s *ScanService) GetTemplate(ctx context.Context, actor policy.Actor, id string) (TemplateSummary, error) {
+	if !actor.Can(entity.PermScanRead) {
+		return TemplateSummary{}, apperr.ErrForbidden
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return TemplateSummary{}, apperr.NewAppError("INVALID_INPUT", "Template id is required", 400)
+	}
+	if s.catalog == nil {
+		return TemplateSummary{}, apperr.ErrNotFound
+	}
+	item, ok := s.catalog.Get(id)
+	if !ok {
+		return TemplateSummary{}, apperr.ErrNotFound
+	}
+	return item, nil
+}
+
+func matchesTemplateFilter(item TemplateSummary, filter TemplateFilter) bool {
+	if len(filter.Severity) > 0 {
+		matched := false
+		for _, want := range filter.Severity {
+			if strings.EqualFold(strings.TrimSpace(want), item.Severity) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if tag := strings.TrimSpace(filter.Tag); tag != "" {
+		matched := false
+		for _, t := range item.Tags {
+			if strings.EqualFold(t, tag) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if search := strings.ToLower(strings.TrimSpace(filter.Search)); search != "" {
+		haystack := strings.ToLower(item.ID + " " + item.Name + " " + item.Description)
+		if !strings.Contains(haystack, search) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *ScanService) CancelScan(ctx context.Context, actor policy.Actor, id uint) error {

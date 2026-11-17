@@ -279,6 +279,56 @@ func (c registryCatalog) ResolveIDs(selectors string) ([]string, error) {
 	return ids, nil
 }
 
+// List exposes the embedded registry as the template catalogue the API serves.
+func (c registryCatalog) List() []application.TemplateSummary {
+	if c.reg == nil {
+		return nil
+	}
+	plugins := c.reg.List()
+	out := make([]application.TemplateSummary, 0, len(plugins))
+	for _, p := range plugins {
+		out = append(out, templateSummary(p))
+	}
+	return out
+}
+
+func (c registryCatalog) Get(id string) (application.TemplateSummary, bool) {
+	if c.reg == nil {
+		return application.TemplateSummary{}, false
+	}
+	p := c.reg.Get(id)
+	if p == nil {
+		return application.TemplateSummary{}, false
+	}
+	return templateSummary(p), true
+}
+
+func templateSummary(p *detector.Plugin) application.TemplateSummary {
+	matchers := make([]string, 0, len(p.Matchers))
+	for _, m := range p.Matchers {
+		matchers = append(matchers, string(m.Type))
+	}
+	tags := p.Metadata.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	engine := p.Engine
+	if engine == "" {
+		engine = "http"
+	}
+	return application.TemplateSummary{
+		ID:           p.Metadata.ID,
+		Name:         p.Metadata.Name,
+		Description:  p.Metadata.Description,
+		Severity:     string(p.Metadata.Severity),
+		Engine:       engine,
+		Tags:         tags,
+		Reference:    p.Metadata.Reference,
+		PayloadCount: len(p.Payloads),
+		Matchers:     matchers,
+	}
+}
+
 func newAuthMiddleware() (*middleware.Auth, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {

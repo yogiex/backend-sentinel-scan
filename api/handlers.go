@@ -270,11 +270,47 @@ func (h *Handler) GetScanResults(w http.ResponseWriter, r *http.Request) {
 
 // ── Templates ───────────────────────────────────────────────
 
-// ListTemplates is a placeholder until the template registry is wired.
+// ListTemplates returns the built-in detection plugins this backend can run.
+// Filters: ?severity=critical,high &tag=xss &search=injection.
 func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
-	httpx.JSON(w, http.StatusOK, []string{})
+	a, ok := actor(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	items, err := h.scans.ListTemplates(r.Context(), a, application.TemplateFilter{
+		Severity: splitCSV(q.Get("severity")),
+		Tag:      q.Get("tag"),
+		Search:   q.Get("search"),
+	})
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 
 func (h *Handler) GetTemplate(w http.ResponseWriter, r *http.Request) {
-	httpx.Error(w, http.StatusNotFound, "NOT_FOUND", "Template not found")
+	a, ok := actor(w, r)
+	if !ok {
+		return
+	}
+	item, err := h.scans.GetTemplate(r.Context(), a, mux.Vars(r)["id"])
+	if err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, item)
+}
+
+// splitCSV splits a comma-separated query parameter, dropping empty terms.
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
