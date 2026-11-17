@@ -41,8 +41,19 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   penyimpanan temuan idempoten; `scan_jobs.truncated` untuk laporan parsial.
 - **[scan]** `PATCH/POST /scans/{id}/cancel` kini membatalkan context scan;
   setiap scan punya context sendiri (`worker.Task.Ctx`) dan `orchestrator.Cancel`.
-- **[docs]** `docs/BACKEND-DEV.md`: tata bahasa selector, tabel budget, status
-  engine, dan sisa pekerjaan yang diperbarui.
+- **[api]** `GET /api/templates` menyajikan katalog nyata dari registry embedded
+  (id, nama, severity, engine, tag, `payload_count`, matcher) dengan filter
+  `severity`/`tag`/`search`, dan `GET /api/templates/{id}` mengembalikan satu
+  plugin atau `404`. Sebelumnya endpoint ini selalu `[]` dan `404`.
+- **[stream]** `GET /api/scans/{id}/stream` kini WebSocket sungguhan: ownership
+  diperiksa sebelum upgrade, `Origin` dicocokkan eksak, dan frame dikirim sebagai
+  `{type,data}` untuk `progress`, `finding`, `complete`, `failed`. Klien yang
+  telat connect menerima snapshot progress + maksimal 50 finding.
+- **[scan]** Crawl opsional per scan (`crawl.enabled/max_depth/max_pages/
+  respect_robots`) dijalankan sebagai fase sendiri sebelum fan-out task; opsi
+  disimpan di `scan_jobs` sehingga laporan bisa menjelaskan asal target.
+- **[docs]** `docs/BACKEND-DEV.md`: tata bahasa selector, tabel budget, kontrak
+  crawl, status engine, env `CRAWLER_*`, dan sisa pekerjaan yang diperbarui.
 
 ### Changed
 
@@ -55,6 +66,11 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   publisher masih stub dan akan membuang task tanpa error.
 - **[scan]** `HeadlessEngine` mengembalikan `ErrHeadlessNotImplemented` alih-alih
   "tidak ada temuan", supaya scan headless tidak tampak bersih.
+- **[scan]** Budget request dibuat saat scan dimulai, bukan setelah task diantre,
+  sehingga request crawl ikut terhitung. `total_tasks` dihitung ulang setelah
+  crawl (fase `crawling` → `scanning`).
+- **[stream]** `middleware.QueryToken` menerima `?token=` hanya untuk route
+  `/stream`, karena browser tidak bisa memasang header pada handshake WebSocket.
 
 ### Fixed
 
@@ -68,6 +84,14 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   mengembalikan error parsing alih-alih melewatinya diam-diam.
 - **[scan]** `Plugin.Validate` menolak method/severity/matcher tak dikenal,
   payload kosong, id tidak valid, dan baseline yang mengandung `FUZZ`.
+- **[crawl]** `max_pages` tidak pernah ditegakkan (semua link yang terjangkau
+  diambil) dan filter robots selalu `nil` sehingga `respect_robots` tidak
+  berpengaruh; keduanya kini benar-benar membatasi crawl.
+- **[crawl]** `Crawler.Run` tidak lagi menumpuk hasil antar-pemanggilan dan
+  `truncated` hanya ditandai bila ada halaman yang benar-benar terlewat.
+- **[stream]** Orchestrator sebelumnya tidak lagi menerbitkan event apa pun
+  (bus dicabut sebagai "unused"), sehingga `/stream` akan menggantung tanpa
+  `complete`; event progress/complete/failed kini diproduksi lagi.
 
 ### Security
 
@@ -76,12 +100,22 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - **[scan]** Respons target dibatasi 2 MiB untuk mencegah kehabisan memori worker.
 - **[scan]** Budget request membatasi volume keluar per scan (default 60 × target),
   sehingga scan tidak bisa dipakai membanjiri target.
+- **[crawl]** URL hasil crawl adalah input dari penyerang: setiap URL divalidasi
+  ulang ke kebijakan SSRF sebelum dipindai, scope dibatasi same-domain
+  (`ScopeUnrestricted` dipaksa turun), dan brute-force path guessing tidak
+  diekspos ke API.
 
 ### Tests
 
 - **[scan]** Test baru: budget/rate egress, validasi plugin, encoding payload,
   batas body, resolusi selector, engine satu-plugin-per-task, guard redirect
   metadata, serta alur orchestrator (progress, persistensi, cancel, truncated).
+- **[crawl]** Test baru: `max_pages`/`max_depth`/`robots.txt` benar-benar
+  membatasi crawl, crawl memperluas target dan membuang host asing, kegagalan
+  crawl jatuh ke target awal, serta nilai `crawl` divalidasi sebelum disimpan.
+- **[api]** Test baru: katalog template (filter + 404 + permission), stream
+  (snapshot, event live, terminal via polling status, 404 scan asing, 403
+  origin, 501 tanpa bus), dan `QueryToken` hanya berlaku di route stream.
 
 ## [0.2.0] - 2026-11-16
 

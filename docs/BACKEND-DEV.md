@@ -22,12 +22,18 @@ endpoint login, error format JSON yang belum ada, dan path
 | Guard jalur keluar | client hasil `ssrf.Guard.Client` dipakai detector **dan** crawler: IP diperiksa saat dial, redirect divalidasi ulang |
 | Batas keluar | budget request per scan (default 60 × jumlah target), rate limit per host (5 rps / burst 10), timeout task dari config |
 | Pembatalan | `POST /scans/{id}/cancel` membatalkan context scan, bukan hanya kolom status |
+| Crawl | `crawl` opsional per scan: link discovery same-domain, `max_depth`/`max_pages`/`robots.txt` benar-benar ditegakkan, URL temuan divalidasi ulang ke kebijakan SSRF |
+| Katalog template | `GET /api/templates` mengembalikan 9 plugin yang benar-benar dijalankan (bukan `[]`) |
+| Streaming | `GET /scans/{id}/stream` WebSocket nyata: `progress`/`finding`/`complete`/`failed`, ownership dicek sebelum upgrade |
 
 Masih **belum** (jangan diasumsikan jalan): engine headless (selalu error
-`ErrHeadlessNotImplemented`), crawl (kode ada, belum dipanggil), WebSocket stream
-(501), export/download report (501), template registry endpoint (`[]` — pakai
-daftar plugin di bawah), RabbitMQ (ditolak saat startup), frontend-facing
-progress realtime.
+`ErrHeadlessNotImplemented`), export/download report PDF (501), RabbitMQ
+(ditolak saat startup), stream audit log (`/ws/logs`).
+
+Catatan batas: crawl **hanya** link discovery. Brute-force path guessing ada di
+kode (`BruteForceDiscovery`) tetapi tidak bisa dipilih lewat API, karena satu
+submission bisa berubah menjadi ribuan request ke host yang belum tentu milik
+pemanggil.
 
 ## 2. Menjalankan
 
@@ -66,6 +72,14 @@ ber-versi (golang-migrate) dipasang.
 | `SCAN_MAX_REQUESTS_PER_SCAN` | 0 | 0 → diturunkan dari target × `SCAN_MAX_REQUESTS_PER_TARGET` |
 | `SCAN_MAX_REQUESTS_PER_TARGET` | 60 | 38 payload + 2 baseline per target dengan margin |
 | `SCAN_MAX_PAYLOADS_PER_PLUGIN` | 20 | |
+| `CRAWLER_MAXDEPTH` | 2 | batas kedalaman link discovery |
+| `CRAWLER_MAXPAGES` | 50 | batas halaman per crawl |
+| `CRAWLER_CONCURRENCY` | 4 | worker crawl |
+| `CRAWLER_RATELIMITMS` | 200 | jeda antar request crawl |
+| `CRAWLER_TIMEOUTSEC` | 10 | timeout per request crawl |
+| `CRAWLER_MAXDURATIONSEC` | 60 | batas total fase crawl |
+| `CRAWLER_RESPECTROBOTS` | true | patuhi robots.txt |
+| `CRAWLER_USERAGENT` | `SentinelScan-Crawler/1.0` | |
 
 ### Template selectors
 
@@ -77,6 +91,37 @@ plugin. Contoh: `xss`, `critical`, `sqli,xss-reflected`.
 Plugin yang tersedia (registry embedded `internal/infrastructure/detector/plugins`):
 `idor`, `open-redirect`, `path-traversal`, `sql-injection-error`,
 `sql-injection-boolean`, `sql-injection-time`, `ssrf`, `xss-reflected`, `xxe`.
+
+### Crawl
+
+Body `POST /api/scans` boleh membawa objek `crawl`:
+
+```json
+{
+  "targets": ["https://contoh.test/"],
+  "template_selectors": "xss",
+  "crawl": {"enabled": true, "max_depth": 1, "max_pages": 20, "respect_robots": true}
+}
+```
+
+Aturan yang berlaku:
+
+1. `max_depth` 0 → default 2, batas 1..5; `max_pages` 0 → default 50, batas 1..200.
+   Di luar rentang → `400`.
+2. Crawl **hanya** link discovery, scope same-domain, dan tidak pernah mengirim
+   POST/DELETE ke target.
+3. Setiap URL hasil crawl divalidasi ulang `ssrf.Guard` sebelum menjadi target;
+   host di luar kebijakan dibuang, bukan dipindai (link di HTML target adalah
+   input penyerang).
+4. Crawl berjalan sebagai fase sendiri (`progress.phase = "crawling"`), lalu
+   `scanning`. `total_tasks` baru terisi setelah crawl selesai.
+5. Crawl gagal/timeout → scan tetap jalan dengan target yang disubmit
+   (graceful degradation).
+6. Bila `max_pages` tercapai dan masih ada halaman yang ingin diambil, scan
+   ditandai `truncated: true`. Menghabiskan kuota tanpa sisa halaman **tidak**
+   dianggap truncated.
+7. Request crawl memakai budget scan yang sama, jadi crawl dan pemindaian tidak
+   bisa dipakai membanjiri target secara terpisah.
 
 ### Budget dan pembatalan
 
@@ -111,13 +156,14 @@ Tanpa token → `401 {"error":{"code":"UNAUTHORIZED",...}}`.
 | GET | `/api/scans/{id}` | 404 jika bukan milik pemanggil |
 | POST | `/api/scans/{id}/cancel` | transisi status sah saja |
 | GET | `/api/scans/{id}/results` | `?limit=` (maks 1000) |
-| GET | `/api/scans/{id}/stream` | 501 (belum diimplementasi) |
+| GET | `/api/scans/{id}/stream` | WebSocket `{type,data}`; token boleh lewat `?token=` (khusus route ini), `Origin` dicek terhadap allowlist |
+| GET | `/api/templates` | 9 plugin dengan filter `severity`,`tag`,`search` |
 | GET/POST | `/api/credentials` | config selalu diredaksi jadi `{"configured":true}` |
 | GET/PUT/DELETE | `/api/credentials/{id}` | scoped ke pemilik; milik orang lain → 404/403 |
 | POST | `/api/credentials/{id}/verify` | fetch `verify_url` lewat client SSRF-safe |
 | GET | `/api/scans/{id}/report-data` | ringkasan severity + findings |
 | POST/GET | `/api/scans/{id}/report/export`,`/download` | 501 |
-| GET | `/api/templates`, `/api/templates/{id}` | `[]` / 404 (registry belum di-wire) |
+| GET | `/api/templates/{id}` | satu plugin, 404 bila tidak ada |
 
 Error selalu `{"error":{"code":"...","message":"..."}}` — bukan plain text.
 
@@ -157,15 +203,17 @@ Chromium dan `gofmt` untuk file lama yang tak tersentuh.
 
 ## 7. Langkah berikutnya (prioritas)
 
-1. Sambungkan crawl: `crawler.Run` → daftar URL/form → deteksi per hasil.
-2. Implementasikan WebSocket di atas `event.Bus` (+ `Unsubscribe` di `defer`).
-3. Migrasi ber-versi (golang-migrate) menggantikan `AutoMigrate`; index unik
+1. Migrasi ber-versi (golang-migrate) menggantikan `AutoMigrate`; index unik
    parsial `findings(scan_id,target,template_id) WHERE deleted_at IS NULL`
    sudah dibuat lewat tag GORM dan perlu ikut dipindahkan.
-4. FK + strategi delete: hapus scan saat ini menghapus findings, tetapi ticket
-   yang menunjuk finding tersebut menjadi yatim (lihat §9).
-5. Perbaiki test yang masih di-`//go:build ignore` (`messaging_test.go`,
+2. FK + strategi delete: hapus scan saat ini menghapus findings, tetapi ticket
+   yang menunjuk finding tersebut menjadi yatim (lihat §6, utang DB).
+3. Report PDF (`report/generator.go` masih struct kosong; `chromedp` belum jadi
+   dependency) + cleanup temp file Chromium.
+4. Perbaiki test yang masih di-`//go:build ignore` (`messaging_test.go`,
    `websocket_test.go`, `user_repository_test.go`, `headless_engine_test.go`).
+5. Rekonsiliasi scan zombie saat restart: scan berstatus `running` yang
+   prosesnya mati tidak pernah ditutup.
 
 ## 8. Utang keamanan: CVE dependensi (per 2026-11-16)
 

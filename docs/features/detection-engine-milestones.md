@@ -56,12 +56,12 @@
 
 | # | Task | Status |
 |:--|:-----|:-------|
-| 4.1 | Integrasi detector ke HTTPEngine (`scanner/scanner.go`) | ❌ Belum |
-| 4.2 | Tambah detector config ke viper loader (`config/config.go`) | ❌ Belum |
+| 4.1 | Integrasi detector ke HTTPEngine (`scanner/scanner.go`) | ✅ Selesai (`37526c0`) |
+| 4.2 | Tambah detector config ke viper loader (`config/config.go`) | ⚠️ Parsial — client/plugin dimuat lewat env di `main.go`; loader viper masih placeholder |
 | 4.3 | Unit tests semua matchers (`matcher/*_test.go`) | ✅ Selesai |
 | 4.4 | Unit tests plugin loader (`detector_test.go`) | ✅ Selesai |
-| 4.5 | Integration tests (httptest server per vuln type) | ❌ Belum |
-| 4.6 | Benchmarks plugin execution | ❌ Belum |
+| 4.5 | Integration tests (httptest server per vuln type) | ✅ Selesai (`internal/infrastructure/scanner/engine_test.go`) |
+| 4.6 | Benchmarks plugin execution | ✅ Selesai (`test/benchmarks/engine_benchmark_test.go`) |
 
 **Estimasi:** 2-3 hari &nbsp;|&nbsp; **Progress:** 33%
 
@@ -88,6 +88,6 @@
 | 1 | Core Framework | 7 | ✅ Selesai | 4-5 hari |
 | 2 | Advanced Matchers | 4 | ✅ Selesai | 3-4 hari |
 | 3 | Built-in Plugins | 7 | ✅ Selesai | 2-3 hari |
-| 4 | Integration & Testing | 6 | ⏳ Parsial (33%) | 2-3 hari |
+| 4 | Integration & Testing | 6 | ⏳ Parsial (83%) | 2-3 hari |
 | 5 | Advanced Features | 5 | ❌ Belum | 5-7 hari |
 | | **Total** | **29** | **✅ 17 / ❌ 8 / ⏳ 4** | **16-22 hari** |

@@ -1,5 +1,10 @@
 # Milestone Development — SentinelScan Go Backend
 
+> ⚠️ **Tabel di bawah adalah target historis, bukan status berjalan.** Beberapa
+> baris ditandai ✅ padahal implementasinya masih stub (RabbitMQ ditolak saat
+> startup, PDF report belum ada, WebSocket baru aktif per 2026-11-17). Status
+> yang dapat dipercaya ada di [`docs/BACKEND-DEV.md`](../BACKEND-DEV.md) §1.
+
 | # | Milestone | Fase | Selesai | Poin Utama |
 |---|-----------|------|---------|------------|
 | M1 | **Foundation & Core Domain** | Sprint 1 | ✅ | Entity layer (ScanJob, Finding, Ticket, User, AuthCredential, AuditLog, dll), status transitions dengan validasi, repository interfaces, service layer (Scan, Ticket, Auth, Report, AuthCredential) |
