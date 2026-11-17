@@ -181,6 +181,7 @@ func run() error {
 		FindingRepo:        findingRepo,
 		MaxRequestsPerScan: int64(envInt("SCAN_MAX_REQUESTS_PER_SCAN", 0)),
 		RequestsPerTarget:  int64(envInt("SCAN_MAX_REQUESTS_PER_TARGET", 60)),
+		Events:             eventBus,
 	}).WithBaseContext(ctx)
 	orch.StartDispatchLoop(ctx)
 	defer orch.StopAll()
@@ -206,12 +207,15 @@ func run() error {
 	}
 
 	// ── HTTP ────────────────────────────────────────────────
+	allowedOrigins := splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"))
 	handler := api.NewHandler(scanService, ticketService, authService, credService, reportService, guard).
-		WithAuthIssuer(authMW)
+		WithAuthIssuer(authMW).
+		WithEventBus(eventBus).
+		WithAllowedOrigins(allowedOrigins)
 
 	router := api.NewRouter(handler, api.RouterDeps{
 		Auth:             authMW,
-		AllowedOrigins:   splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")),
+		AllowedOrigins:   allowedOrigins,
 		AllowCredentials: envBool("CORS_ALLOW_CREDENTIALS", false),
 	})
 

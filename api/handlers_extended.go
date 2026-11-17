@@ -10,12 +10,6 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/httpx"
 )
 
-// StreamHandler will upgrade to a WebSocket once the event pipeline is wired.
-// It returns 501 instead of a fake success so clients can detect the gap.
-func (h *Handler) StreamHandler(w http.ResponseWriter, r *http.Request) {
-	httpx.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "WebSocket streaming is not implemented yet")
-}
-
 // ── Credentials ─────────────────────────────────────────────
 
 type createCredentialRequest struct {

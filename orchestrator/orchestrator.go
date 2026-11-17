@@ -11,6 +11,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/detector"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/worker"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/egress"
 )
@@ -30,6 +31,9 @@ type Config struct {
 	// RequestsPerTarget is the implied per-target request budget; 60 covers the
 	// 38 payloads and 2 baselines of the built-in plugin set with headroom.
 	RequestsPerTarget int64
+	// Events carries live scan progress to WebSocket subscribers. Optional:
+	// nil means nothing is published, which is what unit tests want.
+	Events *event.Bus
 }
 
 // scanRun is the live state of one scan: its context (so cancellation and
@@ -126,6 +130,7 @@ func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelector
 		cancel()
 		return fmt.Errorf("orchestrator: mark running: %w", err)
 	}
+	o.publishProgress(scanID, run.progress)
 
 	for _, target := range targets {
 		for _, plugin := range plugins {
@@ -156,6 +161,7 @@ func (o *Orchestrator) Cancel(scanID uint) bool {
 	o.mu.Unlock()
 	if ok {
 		run.cancel()
+		o.publish(event.EventTypeFailed, scanID, map[string]string{"reason": "cancelled"})
 	}
 	return ok
 }
@@ -238,7 +244,15 @@ func (o *Orchestrator) persistFinding(ctx context.Context, result worker.Result)
 	defer cancel()
 	if err := o.cfg.FindingRepo.CreateBatch(writeCtx, []*entity.Finding{finding}); err != nil {
 		log.Printf("dispatch: scan %d: persist finding: %v", result.ScanID, err)
+		return
 	}
+	o.publish(event.EventTypeFinding, result.ScanID, map[string]any{
+		"scan_id":     finding.ScanID,
+		"target":      finding.Target,
+		"template_id": finding.TemplateID,
+		"severity":    finding.Severity,
+		"details":     finding.Details,
+	})
 }
 
 // record advances progress for one finished task and closes the scan when the
@@ -273,16 +287,43 @@ func (o *Orchestrator) record(result worker.Result) error {
 	if err := o.cfg.ScanRepo.UpdateProgress(ctx, result.ScanID, &progress); err != nil {
 		return fmt.Errorf("update progress: %w", err)
 	}
+	o.publishProgress(result.ScanID, progress)
 	if truncated {
 		// Stop the tasks still in flight or queued: the budget is spent.
 		cancel()
 		if err := o.cfg.ScanRepo.SetTruncated(ctx, result.ScanID); err != nil {
 			return fmt.Errorf("mark truncated: %w", err)
 		}
-		return o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusCompleted)
+		if err := o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusCompleted); err != nil {
+			return err
+		}
+		o.publish(event.EventTypeComplete, result.ScanID, map[string]any{"truncated": true})
+		return nil
 	}
 	if allDone {
-		return o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusCompleted)
+		if err := o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusCompleted); err != nil {
+			return err
+		}
+		o.publish(event.EventTypeComplete, result.ScanID, map[string]any{"truncated": false})
 	}
 	return nil
+}
+
+// publishProgress emits the current counters. Progress is best-effort: the bus
+// drops events for a subscriber that cannot keep up, and every subscriber also
+// reads the persisted progress on connect, so a gap is recoverable.
+func (o *Orchestrator) publishProgress(scanID uint, progress entity.ScanProgress) {
+	o.publish(event.EventTypeProgress, scanID, map[string]int{
+		"completed":   progress.Completed,
+		"failed":      progress.Failed,
+		"total":       progress.TotalTasks,
+		"in_progress": progress.InProgress,
+	})
+}
+
+func (o *Orchestrator) publish(eventType event.EventType, scanID uint, payload any) {
+	if o.cfg.Events == nil {
+		return
+	}
+	o.cfg.Events.Publish(fmt.Sprint(scanID), event.Event{Type: eventType, Payload: payload})
 }

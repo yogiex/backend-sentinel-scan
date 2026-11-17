@@ -123,3 +123,23 @@ func (a *Auth) Require(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey{}, actor)))
 	})
 }
+
+// QueryToken copies ?token= into the Authorization header for routes that end
+// with suffix.
+//
+// Browsers cannot set headers on a WebSocket handshake, so a query token is the
+// only option. That trade is kept narrow: only the streaming route accepts it,
+// and tokens in URLs should be treated as loggable (do not log query strings on
+// that path).
+func QueryToken(suffix string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") == "" && strings.HasSuffix(r.URL.Path, suffix) {
+				if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}

@@ -84,3 +84,12 @@ func (b *Bus) PublishProgress(scanID string, completed, total int) {
 func (b *Bus) PublishComplete(scanID string) {
 	b.Publish(scanID, Event{Type: EventTypeComplete})
 }
+
+// PublishFailed reports a scan that ended without completing normally (user
+// cancel, dispatcher failure). The reason is a stable machine-readable token,
+// not a rendered message: the UI decides how to show it.
+func (b *Bus) PublishFailed(scanID, reason string) {
+	b.Publish(scanID, Event{Type: EventTypeFailed, Payload: map[string]string{
+		"reason": reason,
+	}})
+}

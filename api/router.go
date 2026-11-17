@@ -79,5 +79,8 @@ func NewRouter(h *Handler, deps RouterDeps) http.Handler {
 	return middleware.Chain(dispatch,
 		middleware.SecurityHeaders,
 		middleware.CORS(deps.AllowedOrigins, deps.AllowCredentials),
+		// Runs before authentication so the streaming route can accept a query
+		// token from a browser WebSocket handshake.
+		middleware.QueryToken("/stream"),
 	)
 }

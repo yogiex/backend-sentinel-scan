@@ -13,6 +13,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/policy"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/httpx"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/middleware"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/ssrf"
 )
@@ -26,6 +27,11 @@ type Handler struct {
 	reports    *application.ReportService
 	guard      *ssrf.Guard
 	authIssuer *middleware.Auth
+
+	// events feeds the WebSocket stream; nil means streaming is not wired.
+	events *event.Bus
+	// allowedOrigins is the exact-match list accepted for WebSocket upgrades.
+	allowedOrigins map[string]struct{}
 }
 
 // NewHandler builds the HTTP handler.
@@ -38,6 +44,25 @@ func NewHandler(
 	guard *ssrf.Guard,
 ) *Handler {
 	return &Handler{scans: scans, tickets: tickets, auth: auth, creds: creds, reports: reports, guard: guard}
+}
+
+// WithEventBus attaches the live event pipeline used by /scans/{id}/stream.
+func (h *Handler) WithEventBus(bus *event.Bus) *Handler {
+	h.events = bus
+	return h
+}
+
+// WithAllowedOrigins sets the exact-match origin allowlist for WebSocket
+// upgrades. An empty list rejects every origin-bearing handshake rather than
+// reflecting whatever the client sent.
+func (h *Handler) WithAllowedOrigins(origins []string) *Handler {
+	h.allowedOrigins = make(map[string]struct{}, len(origins))
+	for _, o := range origins {
+		if o = strings.TrimSpace(o); o != "" {
+			h.allowedOrigins[o] = struct{}{}
+		}
+	}
+	return h
 }
 
 // WithAuthIssuer enables the login endpoint.
