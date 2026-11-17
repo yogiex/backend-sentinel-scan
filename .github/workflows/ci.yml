@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, so a shallow clone would quietly hide most of
+          # it.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -33,15 +37,27 @@ jobs:
         run: $(go env GOPATH)/bin/golangci-lint run --timeout=8m
 
       - name: Secret scan — gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Runs the pinned binary instead of gitleaks/gitleaks-action: the action
+        # resolved the commit range through the GitHub API and failed on this
+        # repository without a readable reason (the job log needs admin rights).
+        # A local run of the same version and config over the full history finds
+        # nothing, so the failure was operational, not a finding. Scanning the
+        # whole history with the committed config is also the stronger check.
+        run: |
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git --config .gitleaks.toml --redact --verbose --exit-code 1
 
   sca:
     name: Dependency CVE scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, so a shallow clone would quietly hide most of
+          # it.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -69,6 +85,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, so a shallow clone would quietly hide most of
+          # it.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
