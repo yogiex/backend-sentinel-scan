@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -23,11 +24,16 @@ const (
 	maxTargets      = 50
 	maxSelectorsLen = 4096
 	maxConfigBytes  = 32 << 10
+
+	defaultCrawlDepth = 2
+	defaultCrawlPages = 50
+	maxCrawlDepth     = 5
+	maxCrawlPages     = 200
 )
 
 // ScanDispatcher starts and stops execution of a persisted scan.
 type ScanDispatcher interface {
-	StartScan(scanID uint, targets []string, templateSelectors string) error
+	StartScan(scanID uint, targets []string, templateSelectors string, crawl *entity.CrawlOptions) error
 	// Cancel stops the work in flight. Changing the status alone would leave a
 	// scan marked "cancelled" while its workers kept sending requests.
 	Cancel(scanID uint) bool
@@ -95,7 +101,7 @@ func (s *ScanService) WithCatalog(catalog TemplateCatalog) *ScanService {
 }
 
 // StartScan validates, persists, and dispatches a scan for the given actor.
-func (s *ScanService) StartScan(ctx context.Context, actor policy.Actor, targets []string, templateSelectors string, authCredentialID *uint) (*entity.ScanJob, error) {
+func (s *ScanService) StartScan(ctx context.Context, actor policy.Actor, targets []string, templateSelectors string, authCredentialID *uint, crawl *entity.CrawlOptions) (*entity.ScanJob, error) {
 	if !actor.Can(entity.PermScanCreate) {
 		return nil, apperr.ErrForbidden
 	}
@@ -114,6 +120,11 @@ func (s *ScanService) StartScan(ctx context.Context, actor policy.Actor, targets
 		if len(ids) == 0 {
 			return nil, apperr.NewAppError("INVALID_INPUT", "template_selectors matched no templates", 400)
 		}
+	}
+
+	crawl, err = normalizeCrawlOptions(crawl)
+	if err != nil {
+		return nil, err
 	}
 
 	if authCredentialID != nil {
@@ -137,13 +148,14 @@ func (s *ScanService) StartScan(ctx context.Context, actor policy.Actor, targets
 		TemplateSelectors: templateSelectors,
 		Status:            entity.ScanStatusPending,
 		AuthCredentialID:  authCredentialID,
+		Crawl:             crawl,
 	}
 	if err := s.scans.Create(ctx, scan); err != nil {
 		return nil, err
 	}
 
 	if s.dispatcher != nil {
-		if err := s.dispatcher.StartScan(scan.ID, clean, templateSelectors); err != nil {
+		if err := s.dispatcher.StartScan(scan.ID, clean, templateSelectors, crawl); err != nil {
 			log.Printf("[scan %d] dispatch failed: %v", scan.ID, err)
 			if uerr := s.scans.UpdateStatus(ctx, scan.ID, entity.ScanStatusFailed); uerr != nil {
 				log.Printf("[scan %d] marking failed: %v", scan.ID, uerr)
@@ -152,6 +164,30 @@ func (s *ScanService) StartScan(ctx context.Context, actor policy.Actor, targets
 		}
 	}
 	return scan, nil
+}
+
+// normalizeCrawlOptions validates the crawl request and fills in defaults. A
+// disabled crawl is dropped entirely so the API does not report a crawl object
+// for a scan that never crawled.
+func normalizeCrawlOptions(crawl *entity.CrawlOptions) (*entity.CrawlOptions, error) {
+	if crawl == nil || !crawl.Enabled {
+		return nil, nil
+	}
+	out := *crawl
+	out.Enabled = true
+	if out.MaxDepth == 0 {
+		out.MaxDepth = defaultCrawlDepth
+	}
+	if out.MaxDepth < 0 || out.MaxDepth > maxCrawlDepth {
+		return nil, apperr.NewAppError("INVALID_INPUT", fmt.Sprintf("crawl.max_depth must be between 1 and %d", maxCrawlDepth), 400)
+	}
+	if out.MaxPages == 0 {
+		out.MaxPages = defaultCrawlPages
+	}
+	if out.MaxPages < 1 || out.MaxPages > maxCrawlPages {
+		return nil, apperr.NewAppError("INVALID_INPUT", fmt.Sprintf("crawl.max_pages must be between 1 and %d", maxCrawlPages), 400)
+	}
+	return &out, nil
 }
 
 func (s *ScanService) validateTargets(ctx context.Context, targets []string) ([]string, error) {

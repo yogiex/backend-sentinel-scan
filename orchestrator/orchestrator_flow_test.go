@@ -129,7 +129,7 @@ func TestStartScanQueuesOneTaskPerTargetAndPlugin(t *testing.T) {
 
 	// path-traversal has four payloads but is a single plugin: the queue must
 	// carry exactly one task for it.
-	if err := orch.StartScan(1, []string{"http://example.test"}, "path-traversal"); err != nil {
+	if err := orch.StartScan(1, []string{"http://example.test"}, "path-traversal", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestStartScanQueuesOneTaskPerTargetAndPlugin(t *testing.T) {
 
 func TestUnknownSelectorIsRejected(t *testing.T) {
 	orch, _, _, _, _ := newTestOrchestrator(t)
-	if err := orch.StartScan(1, []string{"http://example.test"}, "not-a-plugin"); err == nil {
+	if err := orch.StartScan(1, []string{"http://example.test"}, "not-a-plugin", nil); err == nil {
 		t.Fatal("unknown selector must fail instead of scanning everything")
 	}
 }
@@ -168,7 +168,7 @@ func TestDispatchPersistsOnlyMatchesAndCompletesScan(t *testing.T) {
 	defer cancel()
 	orch.StartDispatchLoop(ctx)
 
-	if err := orch.StartScan(7, []string{"http://example.test"}, "path-traversal"); err != nil {
+	if err := orch.StartScan(7, []string{"http://example.test"}, "path-traversal", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	<-tasks
@@ -206,7 +206,7 @@ func TestTruncatedResultStopsTheScan(t *testing.T) {
 	defer cancel()
 	orch.StartDispatchLoop(ctx)
 
-	if err := orch.StartScan(9, []string{"http://example.test"}, "xss"); err != nil {
+	if err := orch.StartScan(9, []string{"http://example.test"}, "xss", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	var task worker.Task
@@ -229,7 +229,7 @@ func TestTruncatedResultStopsTheScan(t *testing.T) {
 
 func TestCancelStopsQueuedWork(t *testing.T) {
 	orch, _, _, tasks, _ := newTestOrchestrator(t)
-	if err := orch.StartScan(11, []string{"http://example.test"}, "xss"); err != nil {
+	if err := orch.StartScan(11, []string{"http://example.test"}, "xss", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	var task worker.Task

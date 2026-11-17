@@ -43,6 +43,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/application"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/authscan"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/crawler"
 	dbpkg "github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/database/postgres"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/detector"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
@@ -173,6 +174,22 @@ func run() error {
 	pool.Start()
 	defer pool.Stop()
 
+	crawlDefaults := crawler.CrawlConfig{
+		Link: crawler.LinkConfig{
+			MaxDepth:      cfg.Crawler.MaxDepth,
+			MaxPages:      cfg.Crawler.MaxPages,
+			RateLimit:     time.Duration(cfg.Crawler.RateLimitMS) * time.Millisecond,
+			Concurrency:   cfg.Crawler.Concurrency,
+			RespectRobots: cfg.Crawler.RespectRobots,
+			// Same-domain discovery: a crawled link to another host is not the
+			// caller's authority to scan.
+			Scope:     crawler.ScopeSameDomain,
+			Timeout:   time.Duration(cfg.Crawler.TimeoutSec) * time.Second,
+			UserAgent: cfg.Crawler.UserAgent,
+		},
+		Client: scanClient,
+	}
+
 	orch := orchestrator.New(orchestrator.Config{
 		Registry:           scanDetector.Registry(),
 		TaskQueue:          taskQueue,
@@ -182,6 +199,16 @@ func run() error {
 		MaxRequestsPerScan: int64(envInt("SCAN_MAX_REQUESTS_PER_SCAN", 0)),
 		RequestsPerTarget:  int64(envInt("SCAN_MAX_REQUESTS_PER_TARGET", 60)),
 		Events:             eventBus,
+		CrawlDefaults:      crawlDefaults,
+		CrawlClient:        scanClient,
+		CrawlTimeout:       time.Duration(cfg.Crawler.MaxDurationSec) * time.Second,
+		ValidateTarget: func(ctx context.Context, raw string) (string, error) {
+			u, err := guard.Validate(ctx, raw)
+			if err != nil {
+				return "", err
+			}
+			return u.String(), nil
+		},
 	}).WithBaseContext(ctx)
 	orch.StartDispatchLoop(ctx)
 	defer orch.StopAll()
@@ -251,11 +278,11 @@ func run() error {
 // orchestratorDispatcher adapts the orchestrator to application.ScanDispatcher.
 type orchestratorDispatcher struct{ orch *orchestrator.Orchestrator }
 
-func (d orchestratorDispatcher) StartScan(scanID uint, targets []string, selectors string) error {
+func (d orchestratorDispatcher) StartScan(scanID uint, targets []string, selectors string, crawl *entity.CrawlOptions) error {
 	if d.orch == nil {
 		return nil
 	}
-	return d.orch.StartScan(scanID, targets, selectors)
+	return d.orch.StartScan(scanID, targets, selectors, crawl)
 }
 
 func (d orchestratorDispatcher) Cancel(scanID uint) bool {

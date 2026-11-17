@@ -20,7 +20,11 @@ type ScanJob struct {
 	Status            ScanStatus `json:"status"`
 	// Truncated reports that the scan stopped early because it hit its request
 	// budget. A truncated report is partial by design and must say so.
-	Truncated        bool          `json:"truncated"`
+	Truncated bool `json:"truncated"`
+	// Crawl is the crawl configuration this scan was submitted with. It is
+	// persisted so the report can explain which pages were discovered and so a
+	// scan can be reproduced.
+	Crawl            *CrawlOptions `json:"crawl,omitempty"`
 	Progress         *ScanProgress `json:"progress,omitempty"`
 	AuthCredentialID *uint         `json:"auth_credential_id,omitempty"`
 	CreatedAt        time.Time     `json:"created_at"`
@@ -32,6 +36,23 @@ type ScanProgress struct {
 	Completed  int `json:"completed"`
 	Failed     int `json:"failed"`
 	InProgress int `json:"in_progress"`
+	// Phase is "crawling" while URLs are being discovered and "scanning" once
+	// requests are being sent. Empty for scans that never crawled.
+	Phase string `json:"phase,omitempty"`
+}
+
+// CrawlOptions is the per-scan crawl configuration.
+//
+// Only link discovery is exposed: brute-force path guessing is deliberately not
+// reachable from the API, because it turns one submission into thousands of
+// requests against a host the caller may not own.
+type CrawlOptions struct {
+	Enabled  bool `json:"enabled"`
+	MaxDepth int  `json:"max_depth"`
+	MaxPages int  `json:"max_pages"`
+	// RespectRobots defaults to true; a caller may turn it off for a host it
+	// owns, and that decision is persisted with the scan.
+	RespectRobots bool `json:"respect_robots"`
 }
 
 type Finding struct {

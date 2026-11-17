@@ -87,6 +87,13 @@ func (d *LinkDiscovery) worker(ctx context.Context, workerWg, taskWg *sync.WaitG
 			}
 		}
 
+		// Claim a page slot before fetching. Without this every discoverable
+		// link was fetched, no matter what max_pages said.
+		if !infra.reservePage() {
+			taskWg.Done()
+			continue
+		}
+
 		page, err := d.fetchPage(ctx, task.URL, infra)
 		if err != nil {
 			infra.OnError(err)

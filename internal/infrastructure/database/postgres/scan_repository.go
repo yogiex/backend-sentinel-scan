@@ -133,6 +133,7 @@ func (r *scanRepository) UpdateProgress(ctx context.Context, id uint, progress *
 		"completed_tasks":   progress.Completed,
 		"failed_tasks":      progress.Failed,
 		"in_progress_tasks": progress.InProgress,
+		"phase":             progress.Phase,
 	})
 	if res.Error != nil {
 		return res.Error

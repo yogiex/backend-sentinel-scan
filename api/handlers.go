@@ -188,9 +188,19 @@ func (h *Handler) MeHandler(w http.ResponseWriter, r *http.Request) {
 // ── Scans ───────────────────────────────────────────────────
 
 type createScanRequest struct {
-	Targets           []string `json:"targets"`
-	TemplateSelectors string   `json:"template_selectors"`
-	AuthCredentialID  *uint    `json:"auth_credential_id,omitempty"`
+	Targets           []string      `json:"targets"`
+	TemplateSelectors string        `json:"template_selectors"`
+	AuthCredentialID  *uint         `json:"auth_credential_id,omitempty"`
+	Crawl             *crawlRequest `json:"crawl,omitempty"`
+}
+
+// crawlRequest is the API shape of entity.CrawlOptions. respect_robots is a
+// pointer so "absent" means the safe default (true) rather than false.
+type crawlRequest struct {
+	Enabled       bool  `json:"enabled"`
+	MaxDepth      int   `json:"max_depth"`
+	MaxPages      int   `json:"max_pages"`
+	RespectRobots *bool `json:"respect_robots"`
 }
 
 // CreateScan validates and queues a scan. The response is 202: the scan has
@@ -204,12 +214,28 @@ func (h *Handler) CreateScan(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, &req) {
 		return
 	}
-	scan, err := h.scans.StartScan(r.Context(), a, req.Targets, req.TemplateSelectors, req.AuthCredentialID)
+	scan, err := h.scans.StartScan(r.Context(), a, req.Targets, req.TemplateSelectors, req.AuthCredentialID, req.crawlOptions())
 	if err != nil {
 		httpx.ErrorFrom(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusAccepted, scan)
+}
+
+func (r createScanRequest) crawlOptions() *entity.CrawlOptions {
+	if r.Crawl == nil {
+		return nil
+	}
+	opts := &entity.CrawlOptions{
+		Enabled:       r.Crawl.Enabled,
+		MaxDepth:      r.Crawl.MaxDepth,
+		MaxPages:      r.Crawl.MaxPages,
+		RespectRobots: true,
+	}
+	if r.Crawl.RespectRobots != nil {
+		opts.RespectRobots = *r.Crawl.RespectRobots
+	}
+	return opts
 }
 
 type scanListResponse struct {

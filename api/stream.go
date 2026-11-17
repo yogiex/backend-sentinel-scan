@@ -160,13 +160,14 @@ func writeEnvelope(conn *websocket.Conn, envelope streamEnvelope) bool {
 	return conn.WriteMessage(websocket.TextMessage, payload) == nil
 }
 
-func progressPayload(scanID uint, progress entity.ScanProgress) map[string]int {
-	return map[string]int{
-		"scan_id":     int(scanID),
+func progressPayload(scanID uint, progress entity.ScanProgress) map[string]any {
+	return map[string]any{
+		"scan_id":     scanID,
 		"completed":   progress.Completed,
 		"failed":      progress.Failed,
 		"total":       progress.TotalTasks,
 		"in_progress": progress.InProgress,
+		"phase":       progress.Phase,
 	}
 }
 

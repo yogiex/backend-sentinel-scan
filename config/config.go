@@ -16,6 +16,21 @@ type Config struct {
 	Scanner  ScannerConfig
 	RabbitMQ RabbitMQConfig
 	Report   ReportConfig
+	Crawler  CrawlerConfig
+}
+
+// CrawlerConfig holds the defaults for link discovery. Per-scan options may
+// lower max_depth/max_pages but the orchestrator never raises them above these
+// limits on its own.
+type CrawlerConfig struct {
+	MaxDepth       int
+	MaxPages       int
+	Concurrency    int
+	RateLimitMS    int
+	TimeoutSec     int
+	MaxDurationSec int
+	RespectRobots  bool
+	UserAgent      string
 }
 
 type ReportConfig struct {
@@ -117,17 +132,25 @@ func Load() (*Config, error) {
 	v.SetDefault("rabbitmq.maxretries", 3)
 	v.SetDefault("rabbitmq.retrydelayms", 30000)
 	v.SetDefault("report.outputdir", "./reports")
+	v.SetDefault("crawler.maxdepth", 2)
+	v.SetDefault("crawler.maxpages", 50)
+	v.SetDefault("crawler.concurrency", 4)
+	v.SetDefault("crawler.ratelimitms", 200)
+	v.SetDefault("crawler.timeoutsec", 10)
+	v.SetDefault("crawler.maxdurationsec", 60)
+	v.SetDefault("crawler.respectrobots", true)
+	v.SetDefault("crawler.useragent", "SentinelScan-Crawler/1.0")
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(".")
 	v.AddConfigPath("./config")
-	
+
 	// Configure environment variable handling
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.SetEnvPrefix("") // No prefix, so SERVER_PORT maps to server.port
 	v.AutomaticEnv()
-	
+
 	// Explicitly bind environment variables to ensure they're picked up
 	v.BindEnv("server.host", "SERVER_HOST")
 	v.BindEnv("server.port", "SERVER_PORT")
@@ -164,6 +187,14 @@ func Load() (*Config, error) {
 	v.BindEnv("rabbitmq.maxretries", "RABBITMQ_MAXRETRIES")
 	v.BindEnv("rabbitmq.retrydelayms", "RABBITMQ_RETRYDELAYMS")
 	v.BindEnv("report.outputdir", "REPORT_OUTPUTDIR")
+	v.BindEnv("crawler.maxdepth", "CRAWLER_MAXDEPTH")
+	v.BindEnv("crawler.maxpages", "CRAWLER_MAXPAGES")
+	v.BindEnv("crawler.concurrency", "CRAWLER_CONCURRENCY")
+	v.BindEnv("crawler.ratelimitms", "CRAWLER_RATELIMITMS")
+	v.BindEnv("crawler.timeoutsec", "CRAWLER_TIMEOUTSEC")
+	v.BindEnv("crawler.maxdurationsec", "CRAWLER_MAXDURATIONSEC")
+	v.BindEnv("crawler.respectrobots", "CRAWLER_RESPECTROBOTS")
+	v.BindEnv("crawler.useragent", "CRAWLER_USERAGENT")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

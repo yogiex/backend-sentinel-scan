@@ -10,6 +10,7 @@ import (
 
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/crawler"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/detector"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/worker"
@@ -34,7 +35,25 @@ type Config struct {
 	// Events carries live scan progress to WebSocket subscribers. Optional:
 	// nil means nothing is published, which is what unit tests want.
 	Events *event.Bus
+
+	// CrawlDefaults is the base crawl configuration. Per-scan options may lower
+	// depth and page caps; the SSRF client and the scope rule come from here.
+	CrawlDefaults crawler.CrawlConfig
+	// CrawlClient is the hardened client used for discovery. It shares the
+	// per-scan budget with the detector, so crawler requests count too.
+	CrawlClient crawler.HTTPClient
+	// CrawlTimeout bounds the discovery phase of one scan.
+	CrawlTimeout time.Duration
+	// ValidateTarget re-checks every discovered URL against the SSRF policy.
+	// Discovered links are attacker-controlled input, so an unvalidated URL must
+	// never be scanned. Nil means "no policy configured" and is for tests only.
+	ValidateTarget func(ctx context.Context, raw string) (string, error)
 }
+
+const (
+	phaseCrawling = "crawling"
+	phaseScanning = "scanning"
+)
 
 // scanRun is the live state of one scan: its context (so cancellation and
 // budget exhaustion stop in-flight work), its budget, and its progress.
@@ -72,7 +91,12 @@ func (o *Orchestrator) WithBaseContext(ctx context.Context) *Orchestrator {
 
 // StartScan expands the selectors, records progress, and queues one task per
 // (target, plugin) pair.
-func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelectors string) error {
+//
+// When the scan enables crawling, discovery runs in its own goroutine: a real
+// site takes seconds to minutes to crawl and must not hold the 202 response. The
+// scan context, and therefore the budget, is created here — before discovery —
+// so crawl requests are counted against the same allowance as scan requests.
+func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelectors string, crawl *entity.CrawlOptions) error {
 	if o.cfg.Registry == nil {
 		return errors.New("orchestrator: no plugin registry configured")
 	}
@@ -83,12 +107,22 @@ func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelector
 	if len(plugins) == 0 {
 		return errors.New("orchestrator: selectors matched no plugins")
 	}
-	total := len(targets) * len(plugins)
-	if total == 0 {
+	if len(targets) == 0 {
 		return errors.New("orchestrator: nothing to scan")
 	}
 	if o.cfg.TaskQueue == nil {
 		return errors.New("orchestrator: no task queue configured")
+	}
+
+	crawlPages := 0
+	if crawl != nil && crawl.Enabled {
+		crawlPages = crawl.MaxPages
+		if crawlPages <= 0 {
+			crawlPages = o.cfg.CrawlDefaults.Link.MaxPages
+		}
+		if crawlPages <= 0 {
+			crawlPages = 50
+		}
 	}
 
 	budgetMax := o.cfg.MaxRequestsPerScan
@@ -97,18 +131,21 @@ func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelector
 		if perTarget <= 0 {
 			perTarget = 60
 		}
-		budgetMax = int64(len(targets)) * perTarget
+		budgetMax = int64(len(targets)+crawlPages) * perTarget
 	}
 
 	ctx, cancel := context.WithCancel(o.baseCtx)
 	budget := egress.NewBudget(budgetMax).WithCancel(cancel)
 	ctx = egress.WithBudget(ctx, budget)
 
-	run := &scanRun{
-		ctx:      ctx,
-		cancel:   cancel,
-		budget:   budget,
-		progress: entity.ScanProgress{TotalTasks: total, InProgress: total},
+	run := &scanRun{ctx: ctx, cancel: cancel, budget: budget}
+	if crawlPages > 0 {
+		// The task count is only known after discovery, so the crawl phase
+		// reports progress without a denominator.
+		run.progress = entity.ScanProgress{Phase: phaseCrawling}
+	} else {
+		total := len(targets) * len(plugins)
+		run.progress = entity.ScanProgress{TotalTasks: total, InProgress: total, Phase: phaseScanning}
 	}
 
 	o.mu.Lock()
@@ -132,6 +169,15 @@ func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelector
 	}
 	o.publishProgress(scanID, run.progress)
 
+	if crawlPages > 0 {
+		go o.crawlThenQueue(scanID, run, targets, plugins, crawl)
+		return nil
+	}
+	return o.queueTasks(scanID, run, targets, plugins)
+}
+
+// queueTasks turns a final target list into worker tasks.
+func (o *Orchestrator) queueTasks(scanID uint, run *scanRun, targets []string, plugins []*detector.Plugin) error {
 	for _, target := range targets {
 		for _, plugin := range plugins {
 			task := worker.Task{
@@ -139,17 +185,152 @@ func (o *Orchestrator) StartScan(scanID uint, targets []string, templateSelector
 				ScanID:     scanID,
 				Target:     target,
 				TemplateID: plugin.Metadata.ID,
-				Ctx:        ctx,
+				Ctx:        run.ctx,
 			}
 			select {
 			case o.cfg.TaskQueue <- task:
-			case <-ctx.Done():
+			case <-run.ctx.Done():
 				o.drop(scanID)
-				return fmt.Errorf("orchestrator: scan %d stopped while queueing: %w", scanID, ctx.Err())
+				return fmt.Errorf("orchestrator: scan %d stopped while queueing: %w", scanID, run.ctx.Err())
 			}
 		}
 	}
 	return nil
+}
+
+// crawlThenQueue runs discovery, rewrites the progress counters with the real
+// task count, and queues the scan. A crawl failure degrades to the submitted
+// targets instead of losing the scan.
+func (o *Orchestrator) crawlThenQueue(scanID uint, run *scanRun, targets []string, plugins []*detector.Plugin, crawl *entity.CrawlOptions) {
+	final, truncated, err := o.discover(run.ctx, targets, crawl)
+	if err != nil {
+		log.Printf("crawl: scan %d: %v (scanning the submitted targets only)", scanID, err)
+	}
+	if run.ctx.Err() != nil {
+		// Cancelled mid-crawl: the Cancel path already updated the scan.
+		return
+	}
+	if truncated {
+		o.markTruncated(scanID)
+	}
+
+	total := len(final) * len(plugins)
+	o.mu.Lock()
+	run.progress = entity.ScanProgress{TotalTasks: total, InProgress: total, Phase: phaseScanning}
+	progress := run.progress
+	o.mu.Unlock()
+
+	writeCtx, done := context.WithTimeout(context.WithoutCancel(o.baseCtx), 10*time.Second)
+	defer done()
+	if err := o.cfg.ScanRepo.UpdateProgress(writeCtx, scanID, &progress); err != nil {
+		log.Printf("crawl: scan %d: record progress: %v", scanID, err)
+	}
+	o.publishProgress(scanID, progress)
+
+	if total == 0 {
+		if err := o.cfg.ScanRepo.UpdateStatus(writeCtx, scanID, entity.ScanStatusCompleted); err != nil {
+			log.Printf("crawl: scan %d: complete: %v", scanID, err)
+		}
+		o.publish(event.EventTypeComplete, scanID, map[string]any{"truncated": truncated})
+		return
+	}
+	if err := o.queueTasks(scanID, run, final, plugins); err != nil {
+		log.Printf("crawl: scan %d: queue tasks: %v", scanID, err)
+	}
+}
+
+// discover crawls the seeds and returns the merged target list.
+func (o *Orchestrator) discover(ctx context.Context, seeds []string, crawl *entity.CrawlOptions) ([]string, bool, error) {
+	cfg := o.crawlConfig(crawl)
+	if o.cfg.CrawlTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, o.cfg.CrawlTimeout)
+		defer cancel()
+	}
+	result, err := crawler.New(cfg).Run(ctx, seeds)
+	if err != nil {
+		return seeds, false, err
+	}
+	return mergeTargets(seeds, o.validateDiscovered(ctx, result.DiscoveredURLs)), result.Truncated, nil
+}
+
+// validateDiscovered drops every discovered URL the SSRF policy rejects.
+func (o *Orchestrator) validateDiscovered(ctx context.Context, discovered []crawler.DiscoveredURL) []string {
+	out := make([]string, 0, len(discovered))
+	for _, d := range discovered {
+		raw := d.URL
+		if o.cfg.ValidateTarget != nil {
+			validated, err := o.cfg.ValidateTarget(ctx, raw)
+			if err != nil {
+				continue
+			}
+			raw = validated
+		}
+		out = append(out, raw)
+	}
+	return out
+}
+
+func (o *Orchestrator) crawlConfig(crawl *entity.CrawlOptions) crawler.CrawlConfig {
+	cfg := o.cfg.CrawlDefaults
+	if cfg.Client == nil {
+		cfg.Client = o.cfg.CrawlClient
+	}
+	link := cfg.Link
+	link.Enabled = true
+	if crawl != nil {
+		if crawl.MaxDepth > 0 {
+			link.MaxDepth = crawl.MaxDepth
+		}
+		if crawl.MaxPages > 0 {
+			link.MaxPages = crawl.MaxPages
+		}
+		link.RespectRobots = crawl.RespectRobots
+	}
+	if link.MaxDepth <= 0 {
+		link.MaxDepth = 2
+	}
+	if link.MaxPages <= 0 {
+		link.MaxPages = 50
+	}
+	if link.Concurrency <= 0 {
+		link.Concurrency = 4
+	}
+	if link.Scope == crawler.ScopeUnrestricted {
+		// Never let a caller widen the crawl beyond the target's own domain.
+		link.Scope = crawler.ScopeSameDomain
+	}
+	cfg.Link = link
+	cfg.BruteForce.Enabled = false
+	return cfg
+}
+
+func (o *Orchestrator) markTruncated(scanID uint) {
+	ctx, done := context.WithTimeout(context.WithoutCancel(o.baseCtx), 10*time.Second)
+	defer done()
+	if err := o.cfg.ScanRepo.SetTruncated(ctx, scanID); err != nil {
+		log.Printf("crawl: scan %d: mark truncated: %v", scanID, err)
+	}
+}
+
+// mergeTargets keeps the submitted targets first and appends discovered URLs,
+// removing duplicates.
+func mergeTargets(seeds, discovered []string) []string {
+	seen := make(map[string]struct{}, len(seeds)+len(discovered))
+	out := make([]string, 0, len(seeds)+len(discovered))
+	for _, list := range [][]string{seeds, discovered} {
+		for _, target := range list {
+			if target == "" {
+				continue
+			}
+			if _, dup := seen[target]; dup {
+				continue
+			}
+			seen[target] = struct{}{}
+			out = append(out, target)
+		}
+	}
+	return out
 }
 
 // Cancel stops a running scan. It reports whether the scan was live: a scan
@@ -313,11 +494,12 @@ func (o *Orchestrator) record(result worker.Result) error {
 // drops events for a subscriber that cannot keep up, and every subscriber also
 // reads the persisted progress on connect, so a gap is recoverable.
 func (o *Orchestrator) publishProgress(scanID uint, progress entity.ScanProgress) {
-	o.publish(event.EventTypeProgress, scanID, map[string]int{
+	o.publish(event.EventTypeProgress, scanID, map[string]any{
 		"completed":   progress.Completed,
 		"failed":      progress.Failed,
 		"total":       progress.TotalTasks,
 		"in_progress": progress.InProgress,
+		"phase":       progress.Phase,
 	})
 }
 

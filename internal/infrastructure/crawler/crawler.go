@@ -19,7 +19,10 @@ func New(cfg CrawlConfig) *Crawler {
 }
 
 func (c *Crawler) Start(ctx context.Context, seedURLs []string) (<-chan DiscoveredURL, error) {
-	infra := NewSharedInfra(c.config)
+	return c.start(ctx, seedURLs, NewSharedInfra(c.config))
+}
+
+func (c *Crawler) start(ctx context.Context, seedURLs []string, infra SharedInfra) (<-chan DiscoveredURL, error) {
 	resultCh := make(chan DiscoveredURL, 10000)
 	outCh := make(chan DiscoveredURL, 10000)
 
@@ -78,9 +81,16 @@ func (c *Crawler) Results() []DiscoveredURL {
 	return result
 }
 
+// Run crawls one seed set and returns the result. A Crawler instance keeps the
+// results of its last run only: reusing it across scans used to append forever.
 func (c *Crawler) Run(ctx context.Context, seedURLs []string) (*CrawlResult, error) {
+	c.mu.Lock()
+	c.results = nil
+	c.mu.Unlock()
+
 	start := time.Now()
-	outCh, err := c.Start(ctx, seedURLs)
+	infra := NewSharedInfra(c.config)
+	outCh, err := c.start(ctx, seedURLs, infra)
 	if err != nil {
 		return nil, err
 	}
@@ -90,11 +100,10 @@ func (c *Crawler) Run(ctx context.Context, seedURLs []string) (*CrawlResult, err
 		discovered = append(discovered, url)
 	}
 
-	duration := time.Since(start)
-
 	return &CrawlResult{
 		DiscoveredURLs: discovered,
-		TotalRequests:  len(discovered),
-		Duration:       duration,
+		TotalRequests:  infra.PagesFetched(),
+		Duration:       time.Since(start),
+		Truncated:      infra.PageLimitReached(),
 	}, nil
 }

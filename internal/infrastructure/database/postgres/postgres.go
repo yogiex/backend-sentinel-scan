@@ -22,6 +22,11 @@ type ScanJob struct {
 	TemplateSelectors datatypes.JSON `gorm:"type:jsonb"`
 	Status            string         `gorm:"type:varchar(20);not null;default:pending;index"`
 	Truncated         bool           `gorm:"not null;default:false"`
+	CrawlEnabled      bool           `gorm:"not null;default:false"`
+	CrawlMaxDepth     int            `gorm:"not null;default:0"`
+	CrawlMaxPages     int            `gorm:"not null;default:0"`
+	CrawlRobots       bool           `gorm:"not null;default:true"`
+	Phase             string         `gorm:"type:varchar(20)"`
 	TotalTasks        int            `gorm:"not null;default:0"`
 	CompletedTasks    int            `gorm:"not null;default:0"`
 	FailedTasks       int            `gorm:"not null;default:0"`
@@ -167,11 +172,13 @@ func (m *ScanJob) toEntity() *entity.ScanJob {
 		TemplateSelectors: decodeString(m.TemplateSelectors),
 		Status:            entity.ScanStatus(m.Status),
 		Truncated:         m.Truncated,
+		Crawl:             crawlFromModel(m),
 		Progress: &entity.ScanProgress{
 			TotalTasks: m.TotalTasks,
 			Completed:  m.CompletedTasks,
 			Failed:     m.FailedTasks,
 			InProgress: m.InProgressTasks,
+			Phase:      m.Phase,
 		},
 		AuthCredentialID: m.AuthCredentialID,
 		CreatedAt:        m.CreatedAt,
@@ -192,6 +199,12 @@ func scanFromEntity(e *entity.ScanJob) *ScanJob {
 		Truncated:         e.Truncated,
 		AuthCredentialID:  e.AuthCredentialID,
 	}
+	if e.Crawl != nil {
+		m.CrawlEnabled = e.Crawl.Enabled
+		m.CrawlMaxDepth = e.Crawl.MaxDepth
+		m.CrawlMaxPages = e.Crawl.MaxPages
+		m.CrawlRobots = e.Crawl.RespectRobots
+	}
 	if e.Progress != nil {
 		m.TotalTasks = e.Progress.TotalTasks
 		m.CompletedTasks = e.Progress.Completed
@@ -202,6 +215,20 @@ func scanFromEntity(e *entity.ScanJob) *ScanJob {
 		m.CreatedAt = e.CreatedAt
 	}
 	return m
+}
+
+// crawlFromModel rebuilds the crawl options, returning nil for scans that never
+// crawled so the API does not advertise a crawl object with zero values.
+func crawlFromModel(m *ScanJob) *entity.CrawlOptions {
+	if !m.CrawlEnabled {
+		return nil
+	}
+	return &entity.CrawlOptions{
+		Enabled:       true,
+		MaxDepth:      m.CrawlMaxDepth,
+		MaxPages:      m.CrawlMaxPages,
+		RespectRobots: m.CrawlRobots,
+	}
 }
 
 func (m *Finding) toEntity() *entity.Finding {

@@ -45,14 +45,14 @@ func TestStartScanPublishesInitialProgress(t *testing.T) {
 	ch := bus.Subscribe("3")
 	defer bus.Unsubscribe("3", ch)
 
-	if err := orch.StartScan(3, []string{"http://example.test"}, "xss"); err != nil {
+	if err := orch.StartScan(3, []string{"http://example.test"}, "xss", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	ev := nextEvent(t, ch)
 	if ev.Type != event.EventTypeProgress {
 		t.Fatalf("expected progress first, got %q", ev.Type)
 	}
-	payload, ok := ev.Payload.(map[string]int)
+	payload, ok := ev.Payload.(map[string]any)
 	if !ok {
 		t.Fatalf("unexpected payload type %T", ev.Payload)
 	}
@@ -70,7 +70,7 @@ func TestDispatchPublishesFindingProgressAndComplete(t *testing.T) {
 	defer cancel()
 	orch.StartDispatchLoop(ctx)
 
-	if err := orch.StartScan(5, []string{"http://example.test"}, "xss"); err != nil {
+	if err := orch.StartScan(5, []string{"http://example.test"}, "xss", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	if ev := nextEvent(t, ch); ev.Type != event.EventTypeProgress {
@@ -106,7 +106,7 @@ func TestCancelPublishesFailure(t *testing.T) {
 	ch := bus.Subscribe("8")
 	defer bus.Unsubscribe("8", ch)
 
-	if err := orch.StartScan(8, []string{"http://example.test"}, "xss"); err != nil {
+	if err := orch.StartScan(8, []string{"http://example.test"}, "xss", nil); err != nil {
 		t.Fatalf("start scan: %v", err)
 	}
 	if ev := nextEvent(t, ch); ev.Type != event.EventTypeProgress {

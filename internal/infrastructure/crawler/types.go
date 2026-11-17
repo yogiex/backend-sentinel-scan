@@ -82,6 +82,9 @@ type CrawlResult struct {
 	TotalRequests  int
 	Duration       time.Duration
 	Errors         []error
+	// Truncated reports that the crawl stopped at MaxPages, so the scan that
+	// follows covers only part of the site.
+	Truncated bool
 }
 
 func DefaultLinkConfig() LinkConfig {
