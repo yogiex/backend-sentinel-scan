@@ -59,6 +59,17 @@ func NewRouter(h *Handler, deps RouterDeps) http.Handler {
 	api.HandleFunc("/templates", h.ListTemplates).Methods(http.MethodGet)
 	api.HandleFunc("/templates/{id}", h.GetTemplate).Methods(http.MethodGet)
 
+	// Static ticket paths first: gorilla/mux matches in registration order, so
+	// /tickets/{id} would otherwise swallow /tickets/stats.
+	api.HandleFunc("/tickets", h.ListTickets).Methods(http.MethodGet)
+	api.HandleFunc("/tickets", h.CreateTicket).Methods(http.MethodPost)
+	api.HandleFunc("/tickets/stats", h.TicketStatsHandler).Methods(http.MethodGet)
+	api.HandleFunc("/tickets/overdue", h.ListOverdueTickets).Methods(http.MethodGet)
+	api.HandleFunc("/tickets/{id}", h.GetTicket).Methods(http.MethodGet)
+	api.HandleFunc("/tickets/{id}/status", h.UpdateTicketStatus).Methods(http.MethodPatch)
+	api.HandleFunc("/tickets/{id}/assign", h.AssignTicket).Methods(http.MethodPost)
+	api.HandleFunc("/tickets/{id}/comments", h.AddTicketComment).Methods(http.MethodPost)
+
 	var protected http.Handler = private
 	if deps.Auth != nil {
 		protected = deps.Auth.Require(private)

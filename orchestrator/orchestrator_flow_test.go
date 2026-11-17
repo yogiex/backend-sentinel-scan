@@ -14,12 +14,21 @@ import (
 
 // ── fakes ───────────────────────────────────────────────────
 
+// interruptCall records how reconciliation asked for interrupted scans to be
+// failed, so tests can tell a boot sweep from a stale-heartbeat sweep.
+type interruptCall struct {
+	reason      string
+	staleBefore time.Time
+}
+
 type fakeScanRepo struct {
-	mu        sync.Mutex
-	status    entity.ScanStatus
-	progress  entity.ScanProgress
-	truncated bool
-	updates   int
+	mu         sync.Mutex
+	status     entity.ScanStatus
+	progress   entity.ScanProgress
+	truncated  bool
+	updates    int
+	heartbeats int
+	interrupts []interruptCall
 }
 
 func (f *fakeScanRepo) Create(context.Context, *entity.ScanJob) error { return nil }
@@ -48,11 +57,30 @@ func (f *fakeScanRepo) SetTruncated(context.Context, uint) error {
 	f.truncated = true
 	return nil
 }
+func (f *fakeScanRepo) TouchHeartbeat(context.Context, uint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heartbeats++
+	return nil
+}
+func (f *fakeScanRepo) MarkInterrupted(_ context.Context, reason string, staleBefore time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.interrupts = append(f.interrupts, interruptCall{reason: reason, staleBefore: staleBefore})
+	return 0, nil
+}
 func (f *fakeScanRepo) List(context.Context, repository.ScanFilter) ([]*entity.ScanJob, error) {
 	return nil, nil
 }
 func (f *fakeScanRepo) Count(context.Context, repository.ScanFilter) (int64, error) { return 0, nil }
 func (f *fakeScanRepo) Delete(context.Context, uint) error                          { return nil }
+
+// lifecycleSnapshot reports what the lifecycle code asked the repository to do.
+func (f *fakeScanRepo) lifecycleSnapshot() (int, []interruptCall) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.heartbeats, append([]interruptCall(nil), f.interrupts...)
+}
 
 func (f *fakeScanRepo) snapshot() (entity.ScanStatus, entity.ScanProgress, bool) {
 	f.mu.Lock()

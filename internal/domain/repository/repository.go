@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 )
@@ -17,6 +18,13 @@ type ScanRepository interface {
 	UpdateProgress(ctx context.Context, id uint, progress *entity.ScanProgress) error
 	// SetTruncated records that the scan stopped at its request budget.
 	SetTruncated(ctx context.Context, id uint) error
+	// TouchHeartbeat records that the process that owns the scan is still alive.
+	TouchHeartbeat(ctx context.Context, id uint) error
+	// MarkInterrupted fails every scan that is still in a non-terminal state,
+	// recording reason. When staleBefore is not zero, only scans whose heartbeat
+	// is missing or older than that instant are touched, so a live scan in
+	// another process is left alone.
+	MarkInterrupted(ctx context.Context, reason string, staleBefore time.Time) (int64, error)
 	List(ctx context.Context, filter ScanFilter) ([]*entity.ScanJob, error)
 	Count(ctx context.Context, filter ScanFilter) (int64, error)
 	Delete(ctx context.Context, id uint) error
@@ -37,20 +45,36 @@ type FindingRepository interface {
 	FindByID(ctx context.Context, id uint) (*entity.Finding, error)
 }
 
+// TicketRepository stores remediation tickets. FindByID is unscoped; callers
+// must use the ownership rule in the service (or FindByIDOwned).
 type TicketRepository interface {
 	Create(ctx context.Context, ticket *entity.Ticket) error
 	Update(ctx context.Context, ticket *entity.Ticket) error
 	FindByID(ctx context.Context, id uint) (*entity.Ticket, error)
+	FindByIDOwned(ctx context.Context, id, ownerID uint) (*entity.Ticket, error)
 	List(ctx context.Context, filter TicketFilter) ([]*entity.Ticket, error)
+	Count(ctx context.Context, filter TicketFilter) (int64, error)
+	Stats(ctx context.Context, filter TicketFilter) (*entity.TicketStats, error)
+	CreateComment(ctx context.Context, comment *entity.TicketComment) error
+	ListComments(ctx context.Context, ticketID uint) ([]*entity.TicketComment, error)
 }
 
 type TicketFilter struct {
-	Status     entity.TicketStatus
-	CreatedBy  uint
+	Status    entity.TicketStatus
+	Priority  entity.TicketPriority
+	Severity  string
+	ScanID    uint
+	CreatedBy uint
+	// AssignedTo filters on the assignee.
 	AssignedTo uint
-	Severity   string
-	Page       int
-	PageSize   int
+	// VisibleTo limits the result to tickets the actor created or was assigned.
+	// It is the list-level counterpart of the ownership check, and it is why an
+	// assignee can finally see the work they were given.
+	VisibleTo   uint
+	Search      string
+	OverdueOnly bool
+	Page        int
+	PageSize    int
 }
 
 type UserRepository interface {

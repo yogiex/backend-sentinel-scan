@@ -91,6 +91,12 @@ func (h *Handler) StreamHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Subscribe before the snapshot is written: otherwise an event published
+	// while the snapshot frames are still being sent lands in the gap between
+	// "read the state" and "listen for changes" and is never delivered.
+	events := h.events.Subscribe(fmt.Sprint(id))
+	defer h.events.Unsubscribe(fmt.Sprint(id), events)
+
 	// Catch-up snapshot: a client that connects mid-scan still learns the
 	// current counters and the findings recorded so far.
 	if scan.Progress != nil {
@@ -109,9 +115,6 @@ func (h *Handler) StreamHandler(w http.ResponseWriter, r *http.Request) {
 		writeEnvelope(conn, terminalEnvelope(scan))
 		return
 	}
-
-	events := h.events.Subscribe(fmt.Sprint(id))
-	defer h.events.Unsubscribe(fmt.Sprint(id), events)
 
 	ping := time.NewTicker(streamPingInterval)
 	defer ping.Stop()

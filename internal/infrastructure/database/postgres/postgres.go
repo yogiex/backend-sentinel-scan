@@ -32,6 +32,11 @@ type ScanJob struct {
 	FailedTasks       int            `gorm:"not null;default:0"`
 	InProgressTasks   int            `gorm:"not null;default:0"`
 	AuthCredentialID  *uint          `gorm:"index"`
+	// FailureReason explains an abnormal end (restart, shutdown, auth failure).
+	FailureReason string `gorm:"type:varchar(64)"`
+	// HeartbeatAt is written by the orchestrator that owns the scan, so a scan
+	// that stopped heartbeating can be told apart from one that is still work.
+	HeartbeatAt *time.Time `gorm:"index"`
 }
 
 // Finding carries a partial unique index on (scan_id, target, template_id).
@@ -58,8 +63,22 @@ type Ticket struct {
 	FindingID   uint   `gorm:"index"`
 	Title       string `gorm:"type:varchar(200);not null"`
 	Description string `gorm:"type:text"`
-	Severity    string `gorm:"type:varchar(20);default:info"`
+	Severity    string `gorm:"type:varchar(20);default:info;index"`
+	Priority    string `gorm:"type:varchar(20);not null;default:medium;index"`
 	Status      string `gorm:"type:varchar(20);not null;default:open;index"`
+	// DueDate drives the overdue list. Nullable because a ticket may be created
+	// without an agreed deadline.
+	DueDate   *time.Time `gorm:"index"`
+	ClosedAt  *time.Time
+	UpdatedBy uint `gorm:"index"`
+}
+
+// TicketComment is append-only by construction: there is no update path.
+type TicketComment struct {
+	gorm.Model
+	TicketID uint   `gorm:"not null;index"`
+	AuthorID uint   `gorm:"not null;index"`
+	Message  string `gorm:"type:text;not null"`
 }
 
 type User struct {
@@ -181,6 +200,8 @@ func (m *ScanJob) toEntity() *entity.ScanJob {
 			Phase:      m.Phase,
 		},
 		AuthCredentialID: m.AuthCredentialID,
+		FailureReason:    m.FailureReason,
+		HeartbeatAt:      m.HeartbeatAt,
 		CreatedAt:        m.CreatedAt,
 		UpdatedAt:        m.UpdatedAt,
 	}
@@ -198,6 +219,8 @@ func scanFromEntity(e *entity.ScanJob) *ScanJob {
 		Status:            status,
 		Truncated:         e.Truncated,
 		AuthCredentialID:  e.AuthCredentialID,
+		FailureReason:     e.FailureReason,
+		HeartbeatAt:       e.HeartbeatAt,
 	}
 	if e.Crawl != nil {
 		m.CrawlEnabled = e.Crawl.Enabled
@@ -260,17 +283,37 @@ func findingFromEntity(e *entity.Finding) *Finding {
 }
 
 func (m *Ticket) toEntity() *entity.Ticket {
+	priority := entity.TicketPriority(m.Priority)
+	if priority == "" {
+		priority = entity.PriorityFromSeverity(m.Severity)
+	}
 	return &entity.Ticket{
 		ID:          m.ID,
+		Code:        entity.FormatTicketCode(m.ID),
 		CreatedBy:   m.CreatedBy,
 		AssignedTo:  m.AssignedTo,
+		ScanID:      m.ScanID,
 		FindingID:   m.FindingID,
 		Title:       m.Title,
 		Description: m.Description,
 		Severity:    m.Severity,
+		Priority:    priority,
 		Status:      entity.TicketStatus(m.Status),
+		DueDate:     m.DueDate,
+		ClosedAt:    m.ClosedAt,
+		UpdatedBy:   m.UpdatedBy,
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,
+	}
+}
+
+func (m *TicketComment) toEntity() *entity.TicketComment {
+	return &entity.TicketComment{
+		ID:        m.ID,
+		TicketID:  m.TicketID,
+		AuthorID:  m.AuthorID,
+		Message:   m.Message,
+		CreatedAt: m.CreatedAt,
 	}
 }
 

@@ -1,6 +1,9 @@
 package entity
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type ScanStatus string
 
@@ -27,8 +30,17 @@ type ScanJob struct {
 	Crawl            *CrawlOptions `json:"crawl,omitempty"`
 	Progress         *ScanProgress `json:"progress,omitempty"`
 	AuthCredentialID *uint         `json:"auth_credential_id,omitempty"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
+	// FailureReason explains an abnormal end. It is set by reconciliation (a
+	// scan whose process died) and by the auth phase, never by a normal scan:
+	// an empty reason with status "failed" is still possible for failures that
+	// carry no stable code.
+	FailureReason string `json:"failure_reason,omitempty"`
+	// HeartbeatAt is the last time the process that owns this scan proved it was
+	// alive. A scan that stopped heartbeating is not running any more, whatever
+	// the status column says.
+	HeartbeatAt *time.Time `json:"heartbeat_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type ScanProgress struct {
@@ -74,22 +86,120 @@ type TemplateFilter struct {
 
 type TicketStatus string
 
+// The remediation lifecycle. "closed" is deliberately absent: it said nothing
+// about whether the fix was verified, and every board state is now explicit.
 const (
-	TicketStatusOpen   TicketStatus = "open"
-	TicketStatusClosed TicketStatus = "closed"
+	TicketStatusOpen       TicketStatus = "open"
+	TicketStatusInProgress TicketStatus = "in_progress"
+	TicketStatusFixed      TicketStatus = "fixed"
+	TicketStatusVerified   TicketStatus = "verified"
+	TicketStatusWontFix    TicketStatus = "wont_fix"
 )
 
+// TicketPriority is the remediation urgency, not the finding severity. It is
+// seeded from the severity of the finding a ticket was created from and may be
+// raised or lowered by a human afterwards.
+type TicketPriority string
+
+const (
+	TicketPriorityCritical TicketPriority = "critical"
+	TicketPriorityHigh     TicketPriority = "high"
+	TicketPriorityMedium   TicketPriority = "medium"
+	TicketPriorityLow      TicketPriority = "low"
+)
+
+// ticketTransitions is the remediation state machine. Every state can be
+// reopened to in_progress, because a fix that fails verification has to go back
+// to work; verified and wont_fix are otherwise terminal.
+var ticketTransitions = map[TicketStatus][]TicketStatus{
+	TicketStatusOpen:       {TicketStatusInProgress, TicketStatusFixed, TicketStatusWontFix},
+	TicketStatusInProgress: {TicketStatusOpen, TicketStatusFixed, TicketStatusWontFix},
+	TicketStatusFixed:      {TicketStatusVerified, TicketStatusInProgress, TicketStatusWontFix},
+	TicketStatusVerified:   {TicketStatusInProgress, TicketStatusWontFix},
+	TicketStatusWontFix:    {TicketStatusOpen},
+}
+
+// IsValidTicketStatus reports whether s is one of the five lifecycle states.
+func IsValidTicketStatus(s TicketStatus) bool {
+	_, ok := ticketTransitions[s]
+	return ok
+}
+
+// CanTransitionTicket reports whether a ticket may move from one state to
+// another. Staying in the same state is always allowed so a repeated update is
+// idempotent; moving out of a state that does not exist is not.
+func CanTransitionTicket(from, to TicketStatus) bool {
+	if from == to {
+		return IsValidTicketStatus(to)
+	}
+	for _, next := range ticketTransitions[from] {
+		if next == to {
+			return true
+		}
+	}
+	return false
+}
+
+// PriorityFromSeverity maps a finding severity onto a remediation priority. An
+// unknown or "info" severity is low urgency, not "forget about it".
+func PriorityFromSeverity(severity string) TicketPriority {
+	switch severity {
+	case "critical":
+		return TicketPriorityCritical
+	case "high":
+		return TicketPriorityHigh
+	case "medium":
+		return TicketPriorityMedium
+	default:
+		return TicketPriorityLow
+	}
+}
+
 type Ticket struct {
-	ID          uint         `json:"id"`
-	CreatedBy   uint         `json:"created_by"`
-	AssignedTo  *uint        `json:"assigned_to,omitempty"`
-	FindingID   uint         `json:"finding_id"`
-	Title       string       `json:"title"`
-	Description string       `json:"description"`
-	Severity    string       `json:"severity"`
-	Status      TicketStatus `json:"status"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
+	ID uint `json:"id"`
+	// Code is the human-facing reference (TKT-000123). It is derived from the ID
+	// by the persistence layer and never stored, so it cannot drift.
+	Code        string         `json:"code"`
+	CreatedBy   uint           `json:"created_by"`
+	AssignedTo  *uint          `json:"assigned_to,omitempty"`
+	ScanID      uint           `json:"scan_id"`
+	FindingID   uint           `json:"finding_id"`
+	Title       string         `json:"title"`
+	Description string         `json:"description"`
+	Severity    string         `json:"severity"`
+	Priority    TicketPriority `json:"priority"`
+	Status      TicketStatus   `json:"status"`
+	DueDate     *time.Time     `json:"due_date,omitempty"`
+	ClosedAt    *time.Time     `json:"closed_at,omitempty"`
+	// UpdatedBy is the last actor who changed the ticket; it is what makes an
+	// audit trail possible without a second write.
+	UpdatedBy uint      `json:"updated_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TicketComment is one remark on a ticket. Comments are append-only: editing
+// history is exactly what an auditor needs to see.
+type TicketComment struct {
+	ID        uint      `json:"id"`
+	TicketID  uint      `json:"ticket_id"`
+	AuthorID  uint      `json:"author_id"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// FormatTicketCode renders the human-facing ticket reference.
+func FormatTicketCode(id uint) string {
+	return fmt.Sprintf("TKT-%06d", id)
+}
+
+// TicketStats is the board overview: how much remediation work exists, split by
+// state and urgency, and how much of it is late.
+type TicketStats struct {
+	Total      int64            `json:"total"`
+	ByStatus   map[string]int64 `json:"by_status"`
+	ByPriority map[string]int64 `json:"by_priority"`
+	Overdue    int64            `json:"overdue"`
 }
 
 type User struct {

@@ -48,11 +48,30 @@ type Config struct {
 	// Discovered links are attacker-controlled input, so an unvalidated URL must
 	// never be scanned. Nil means "no policy configured" and is for tests only.
 	ValidateTarget func(ctx context.Context, raw string) (string, error)
+
+	// HeartbeatInterval is how often the running scans prove they are alive and
+	// how long a silent scan is given before it is failed. Zero uses the default.
+	HeartbeatInterval time.Duration
 }
 
 const (
 	phaseCrawling = "crawling"
 	phaseScanning = "scanning"
+
+	// ReasonInterruptedRestart marks scans that were running when the process
+	// died: nothing is running them any more, so "running" was a lie.
+	ReasonInterruptedRestart = "interrupted_by_restart"
+	// ReasonInterruptedShutdown marks scans stopped by a clean shutdown.
+	ReasonInterruptedShutdown = "interrupted_by_shutdown"
+	// ReasonHeartbeatLost marks scans that stopped heartbeating while the process
+	// stayed alive (a wedged run, not a crash).
+	ReasonHeartbeatLost = "heartbeat_lost"
+
+	defaultHeartbeatInterval = 15 * time.Second
+	// heartbeatGrace is how many missed beats are tolerated before a scan is
+	// considered dead. Three intervals tolerate a slow database without turning
+	// a healthy scan into a failed one.
+	heartbeatGrace = 3
 )
 
 // scanRun is the live state of one scan: its context (so cancellation and

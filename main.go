@@ -77,7 +77,7 @@ func run() error {
 		return fmt.Errorf("connect database: %w", err)
 	}
 	if err := db.AutoMigrate(
-		&dbpkg.ScanJob{}, &dbpkg.Finding{}, &dbpkg.Ticket{},
+		&dbpkg.ScanJob{}, &dbpkg.Finding{}, &dbpkg.Ticket{}, &dbpkg.TicketComment{},
 		&dbpkg.User{}, &dbpkg.AuditLog{}, &dbpkg.AuthCredential{},
 		&dbpkg.AuthSessionModel{},
 	); err != nil {
@@ -211,12 +211,27 @@ func run() error {
 		},
 	}).WithBaseContext(ctx)
 	orch.StartDispatchLoop(ctx)
-	defer orch.StopAll()
+	// Nothing can be running at this point: the orchestrator lives in this
+	// process, so a scan left in "pending" or "running" belongs to a previous,
+	// dead process. Saying so is better than a dashboard that lies.
+	if marked, err := orch.ReconcileInterrupted(ctx, orchestrator.ReasonInterruptedRestart); err != nil {
+		return fmt.Errorf("reconcile interrupted scans: %w", err)
+	} else if marked > 0 {
+		log.Printf("reconciled %d scan(s) left unfinished by a previous process", marked)
+	}
+	orch.StartMaintenance(ctx)
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := orch.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: record interrupted scans: %v", err)
+		}
+	}()
 
 	// ── Application services ────────────────────────────────
 	scanService := application.NewScanService(scanRepo, findingRepo, credRepo, guard, orchestratorDispatcher{orch: orch}).
 		WithCatalog(registryCatalog{reg: scanDetector.Registry()})
-	ticketService := application.NewTicketService(ticketRepo, findingRepo, scanRepo)
+	ticketService := application.NewTicketService(ticketRepo, findingRepo, scanRepo, userRepo)
 	authService := application.NewAuthService(userRepo)
 	credService := application.NewAuthCredentialService(credRepo, guard)
 	reportService := application.NewReportService(scanRepo, findingRepo)

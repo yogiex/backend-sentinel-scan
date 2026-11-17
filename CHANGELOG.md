@@ -54,6 +54,18 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   disimpan di `scan_jobs` sehingga laporan bisa menjelaskan asal target.
 - **[docs]** `docs/BACKEND-DEV.md`: tata bahasa selector, tabel budget, kontrak
   crawl, status engine, env `CRAWLER_*`, dan sisa pekerjaan yang diperbarui.
+- **[tickets]** Alur remediasi nyata: `GET/POST /api/tickets`,
+  `GET /tickets/stats`, `GET /tickets/overdue`, `GET /tickets/{id}`,
+  `PATCH /tickets/{id}/status`, `POST /tickets/{id}/assign`, dan
+  `POST /tickets/{id}/comments`. Service dan repository sudah ada tetapi tidak
+  pernah punya route, jadi temuan tidak bisa menjadi tiket sama sekali.
+- **[tickets]** Status 5 tahap (`open`, `in_progress`, `fixed`, `verified`,
+  `wont_fix`) dengan state machine dan `closed_at`, prioritas terpisah dari
+  severity, SLA default (3/7/14/30 hari), komentar append-only, dan kode
+  `TKT-000123` yang diturunkan dari ID.
+- **[scan]** Kolom `failure_reason` + `heartbeat_at` dan rekonsiliasi tiga arah:
+  saat boot (`interrupted_by_restart`), saat shutdown (`interrupted_by_shutdown`),
+  dan saat heartbeat hilang (`heartbeat_lost`).
 
 ### Changed
 
@@ -71,6 +83,15 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   crawl (fase `crawling` → `scanning`).
 - **[stream]** `middleware.QueryToken` menerima `?token=` hanya untuk route
   `/stream`, karena browser tidak bisa memasang header pada handshake WebSocket.
+- **[tickets]** `severity`, `scan_id`, dan target tiket diturunkan dari finding,
+  bukan dari body request: sebelumnya klien bisa mengirim `severity: critical`
+  untuk temuan `info`. Assignee juga wajib user yang ada dan aktif.
+- **[tickets]** Daftar tiket untuk non-reviewer mencakup tiket yang dibuat
+  **atau** ditugaskan kepadanya; sebelumnya hanya `created_by`, sehingga
+  assignee tidak bisa melihat pekerjaannya sendiri.
+- **[scan]** `Shutdown` membatalkan run sekaligus menulis statusnya. Sebelumnya
+  `StopAll` hanya membatalkan context, sehingga setiap restart meninggalkan
+  baris `running` yang tidak pernah ditutup.
 
 ### Fixed
 
@@ -92,6 +113,9 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - **[stream]** Orchestrator sebelumnya tidak lagi menerbitkan event apa pun
   (bus dicabut sebagai "unused"), sehingga `/stream` akan menggantung tanpa
   `complete`; event progress/complete/failed kini diproduksi lagi.
+- **[stream]** `Subscribe` dipindah **sebelum** snapshot ditulis: event yang
+  terbit saat snapshot masih dikirim dulu jatuh ke celah antara "baca state" dan
+  "dengarkan perubahan" dan hilang. Ini penyebab flaky test stream.
 
 ### Security
 
@@ -104,6 +128,12 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
   ulang ke kebijakan SSRF sebelum dipindai, scope dibatasi same-domain
   (`ScopeUnrestricted` dipaksa turun), dan brute-force path guessing tidak
   diekspos ke API.
+- **[tickets]** Tiket asing tidak bisa dibaca, diubah, atau dikomentari: query
+  memakai bentuk `*Owned` (404, bukan 403) dan reviewer (admin/auditor) tetap
+  melihat seluruh papan. Assignee palsu ditolak `400` agar tidak ada tiket
+  yang menunjuk user yang tidak ada.
+- **[scan]** Status scan tidak lagi bisa berbohong selamanya: rekonsiliasi
+  menghapus baris `running`/`pending` yatim, dan shutdown mencatat alasannya.
 
 ### Tests
 
@@ -116,6 +146,13 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - **[api]** Test baru: katalog template (filter + 404 + permission), stream
   (snapshot, event live, terminal via polling status, 404 scan asing, 403
   origin, 501 tanpa bus), dan `QueryToken` hanya berlaku di route stream.
+- **[tickets]** Test baru: severity/scan/prioritas diturunkan dari finding,
+  validasi assignee, transisi status (termasuk transisi ilegal), visibilitas
+  assignee vs reviewer, komentar, stats, dan overdue. Di level HTTP: shape
+  list/detail, `/tickets/stats` tidak tertelan `/tickets/{id}`, 404 tiket asing.
+- **[scan]** Test baru: rekonsiliasi boot, shutdown yang mencatat alasan,
+  heartbeat untuk run hidup, penandaan scan tanpa heartbeat, dan maintenance
+  yang berhenti bersama context.
 
 ## [0.2.0] - 2026-11-16
 

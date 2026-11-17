@@ -30,11 +30,11 @@ func NewTestServer(t *testing.T) *httptest.Server {
 	authCredRepo := postgres.NewAuthCredentialRepository(db)
 
 	scanService := application.NewScanService(scanRepo, findingRepo)
-	ticketService := application.NewTicketService(ticketRepo, findingRepo, userRepo)
+	ticketService := application.NewTicketService(ticketRepo, findingRepo, scanRepo, userRepo)
 	authService := application.NewAuthService(userRepo)
 	authCredService := application.NewAuthCredentialService(authCredRepo)
 
-	handler := api.NewHandler(scanService, ticketService, authService, authCredService, nil)
+	handler := api.NewHandler(scanService, ticketService, authService, authCredService, nil, nil)
 
 	reportSvc := application.NewReportService(scanRepo, findingRepo)
 	pdfGen := report.NewPDFGenerator("")

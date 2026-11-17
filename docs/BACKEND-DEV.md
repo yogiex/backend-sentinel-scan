@@ -25,6 +25,8 @@ endpoint login, error format JSON yang belum ada, dan path
 | Crawl | `crawl` opsional per scan: link discovery same-domain, `max_depth`/`max_pages`/`robots.txt` benar-benar ditegakkan, URL temuan divalidasi ulang ke kebijakan SSRF |
 | Katalog template | `GET /api/templates` mengembalikan 9 plugin yang benar-benar dijalankan (bukan `[]`) |
 | Streaming | `GET /scans/{id}/stream` WebSocket nyata: `progress`/`finding`/`complete`/`failed`, ownership dicek sebelum upgrade |
+| Tiket remediasi | finding → tiket dengan severity/`scan_id` yang **diturunkan dari finding**, 8 endpoint (list/detail/create/status/assign/komentar/stats/overdue), status 5 tahap + SLA |
+| Siklus hidup scan | scan `pending`/`running` yang prosesnya mati ditandai `failed` dengan alasan (`interrupted_by_restart`, `interrupted_by_shutdown`, `heartbeat_lost`); heartbeat 15 detik, ambang 45 detik |
 
 Masih **belum** (jangan diasumsikan jalan): engine headless (selalu error
 `ErrHeadlessNotImplemented`), export/download report PDF (501), RabbitMQ
@@ -164,6 +166,14 @@ Tanpa token → `401 {"error":{"code":"UNAUTHORIZED",...}}`.
 | GET | `/api/scans/{id}/report-data` | ringkasan severity + findings |
 | POST/GET | `/api/scans/{id}/report/export`,`/download` | 501 |
 | GET | `/api/templates/{id}` | satu plugin, 404 bila tidak ada |
+| GET | `/api/tickets` | pagination `page`,`page_size` + filter `status`,`priority`,`severity`,`scan_id`,`assigned_to`,`search`; non-reviewer hanya melihat tiket milik/ditugaskan |
+| POST | `/api/tickets` | `{finding_id,title,description,priority?,assigned_to?,due_date?}` → 201; `severity`/`scan_id` diabaikan karena diambil dari finding |
+| GET | `/api/tickets/stats` | total per status/prioritas + `overdue` (di-scope seperti list) |
+| GET | `/api/tickets/overdue` | tiket lewat `due_date` dan belum selesai |
+| GET | `/api/tickets/{id}` | detail + `comments[]`; tiket asing → 404 |
+| PATCH | `/api/tickets/{id}/status` | state machine 5 tahap; transisi ilegal → 400 |
+| POST | `/api/tickets/{id}/assign` | `{"assigned_to":<id>}` atau `null`; user tidak ada/nonaktif → 400 |
+| POST | `/api/tickets/{id}/comments` | `{"message":"..."}` → 201, author dari token |
 
 Error selalu `{"error":{"code":"...","message":"..."}}` — bukan plain text.
 
@@ -196,6 +206,10 @@ Aturan yang harus dijaga saat menambah endpoint:
 - Worker pool: eksekusi memakai `p.ctx` + timeout 30s (sebelumnya `context.Background()`).
 - Crawler brute-force: pengiriman task `select` dengan `ctx.Done()` + `close` dijamin.
 - Crawler link discovery: drain antrean saat cancel agar `WaitGroup` mencapai nol.
+- Stream WebSocket: `Subscribe` dilakukan sebelum snapshot ditulis; sebelumnya
+  event yang terbit di celah itu hilang dan test menjadi flaky.
+- Orchestrator `StopAll`: shutdown kini menulis status + alasan, bukan hanya
+  membatalkan context (menyebabkan baris `running` abadi).
 
 Batas body respons sudah dikerjakan: `detector.MaxResponseBytes` dan
 `crawler.MaxBodyBytes` (2 MiB, ditandai `Truncated`). Belum: cleanup temp file PDF
@@ -212,8 +226,10 @@ Chromium dan `gofmt` untuk file lama yang tak tersentuh.
    dependency) + cleanup temp file Chromium.
 4. Perbaiki test yang masih di-`//go:build ignore` (`messaging_test.go`,
    `websocket_test.go`, `user_repository_test.go`, `headless_engine_test.go`).
-5. Rekonsiliasi scan zombie saat restart: scan berstatus `running` yang
-   prosesnya mati tidak pernah ditutup.
+5. ~~Rekonsiliasi scan zombie~~ **selesai**: boot sweep, shutdown sweep, dan
+   heartbeat 15 detik/ambang 45 detik (`orchestrator/lifecycle.go`). Sisa
+   terkait: kolom `failure_reason`/`heartbeat_at` baru ada lewat `AutoMigrate`,
+   jadi ikut dipindahkan ke migrasi ber-versi pada butir 1.
 
 ## 8. Utang keamanan: CVE dependensi (per 2026-11-16)
 

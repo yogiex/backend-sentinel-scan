@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -46,11 +47,18 @@ func (r *scanRepository) Create(ctx context.Context, scan *entity.ScanJob) error
 		return apperr.NewAppError("INVALID_INPUT", "At least one target is required", 400)
 	}
 	m := scanFromEntity(scan)
+	if m.HeartbeatAt == nil {
+		// A scan is alive from the moment it exists: otherwise a crash between
+		// creation and dispatch leaves a row no heartbeat rule can ever reclaim.
+		now := time.Now().UTC()
+		m.HeartbeatAt = &now
+	}
 	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
 		return err
 	}
 	scan.ID = m.ID
 	scan.Status = entity.ScanStatus(m.Status)
+	scan.HeartbeatAt = m.HeartbeatAt
 	scan.CreatedAt = m.CreatedAt
 	scan.UpdatedAt = m.UpdatedAt
 	if scan.Progress == nil {
@@ -156,6 +164,44 @@ func (r *scanRepository) SetTruncated(ctx context.Context, id uint) error {
 		return apperr.ErrNotFound
 	}
 	return nil
+}
+
+func (r *scanRepository) TouchHeartbeat(ctx context.Context, id uint) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	res := r.db.WithContext(ctx).Model(&ScanJob{}).
+		Where("id = ? AND status IN ?", id, []string{string(entity.ScanStatusPending), string(entity.ScanStatusRunning)}).
+		Update("heartbeat_at", time.Now().UTC())
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// The scan already reached a terminal state; that is not an error, but
+		// the caller does not need to keep touching it either.
+		return apperr.ErrNotFound
+	}
+	return nil
+}
+
+func (r *scanRepository) MarkInterrupted(ctx context.Context, reason string, staleBefore time.Time) (int64, error) {
+	if err := r.ready(); err != nil {
+		return 0, err
+	}
+	query := r.db.WithContext(ctx).Model(&ScanJob{}).
+		Where("status IN ?", []string{string(entity.ScanStatusPending), string(entity.ScanStatusRunning)})
+	if !staleBefore.IsZero() {
+		query = query.Where("heartbeat_at IS NOT NULL AND heartbeat_at < ?", staleBefore)
+	}
+	updates := map[string]any{
+		"status":         string(entity.ScanStatusFailed),
+		"failure_reason": reason,
+	}
+	res := query.Updates(updates)
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
 }
 
 func (r *scanRepository) List(ctx context.Context, filter repository.ScanFilter) ([]*entity.ScanJob, error) {

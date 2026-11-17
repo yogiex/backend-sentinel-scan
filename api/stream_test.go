@@ -45,7 +45,11 @@ func (s stubScanRepo) UpdateStatus(context.Context, uint, entity.ScanStatus) err
 func (s stubScanRepo) UpdateProgress(context.Context, uint, *entity.ScanProgress) error {
 	return nil
 }
-func (s stubScanRepo) SetTruncated(context.Context, uint) error { return nil }
+func (s stubScanRepo) SetTruncated(context.Context, uint) error   { return nil }
+func (s stubScanRepo) TouchHeartbeat(context.Context, uint) error { return nil }
+func (s stubScanRepo) MarkInterrupted(context.Context, string, time.Time) (int64, error) {
+	return 0, nil
+}
 func (s stubScanRepo) List(context.Context, repository.ScanFilter) ([]*entity.ScanJob, error) {
 	return nil, nil
 }
