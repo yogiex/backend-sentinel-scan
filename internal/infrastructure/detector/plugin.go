@@ -126,6 +126,12 @@ func (p *Plugin) Validate() error {
 		if _, ok := validMatcherTypes[m.Type]; !ok {
 			return fmt.Errorf("plugin %s matcher %d has unknown type %q", p.Metadata.ID, i, m.Type)
 		}
+		if m.Location == MatcherLocationHeader && strings.TrimSpace(m.HeaderName) == "" {
+			return fmt.Errorf("plugin %s matcher %d reads a header but has no header_name", p.Metadata.ID, i)
+		}
+	}
+	if err := p.validateEvidence(p.Matchers); err != nil {
+		return err
 	}
 	for i, payload := range p.Payloads {
 		if strings.TrimSpace(payload.Value) == "" {
@@ -135,6 +141,39 @@ func (p *Plugin) Validate() error {
 	if p.Baseline != nil && strings.Contains(p.Baseline.Path, PlaceholderFUZZ) {
 		return fmt.Errorf("plugin %s baseline path must not contain %s: the baseline is the control request",
 			p.Metadata.ID, PlaceholderFUZZ)
+	}
+	return nil
+}
+
+// validateEvidence rejects matcher sets that cannot distinguish a vulnerable
+// target from a working one.
+//
+// A matcher that accepts any 2xx response is the reason the previous IDOR and
+// SSRF plugins reported almost every live server: "200 OK" means the page
+// exists, not that a vulnerability does. A plugin whose only evidence is a
+// success code is therefore refused at load time instead of being allowed to
+// generate false findings.
+func (p *Plugin) validateEvidence(matchers []MatcherConfig) error {
+	hasContentMatcher := false
+	for _, m := range matchers {
+		if m.Type != MatcherStatus {
+			hasContentMatcher = true
+			break
+		}
+	}
+	if hasContentMatcher {
+		return nil
+	}
+	for _, m := range matchers {
+		for _, pattern := range m.Patterns {
+			var code int
+			n, _ := parseStrictInt(pattern, &code)
+			if n > 0 && code >= 200 && code < 300 {
+				return fmt.Errorf(
+					"plugin %s only matches HTTP %s, which every working page returns; add a keyword, regex, or header matcher that proves the issue",
+					p.Metadata.ID, pattern)
+			}
+		}
 	}
 	return nil
 }

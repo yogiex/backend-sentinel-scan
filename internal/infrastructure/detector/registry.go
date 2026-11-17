@@ -18,6 +18,14 @@ var embeddedPlugins embed.FS
 // Loading is strict: a plugin that fails to parse aborts the load instead of
 // being skipped. Skipping is how a scanner ends up running nine probes while
 // its author believes it runs twelve, with no signal anywhere.
+//
+// The IDOR and SSRF plugins were removed rather than repaired. Both detected by
+// "the server answered 200", which is true of every working page: honest
+// detection needs a second identity for IDOR and an out-of-band callback (or an
+// internal-only resource) for SSRF, neither of which exists yet. A probe that
+// cannot tell a vulnerability from a homepage produces noise, and noise is
+// worse than a documented gap. Plugin.Validate now refuses that shape so it
+// cannot come back by accident.
 type Registry struct {
 	plugins []*Plugin
 	byID    map[string]*Plugin

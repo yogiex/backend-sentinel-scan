@@ -1,6 +1,6 @@
 # Backend Development Notes
 
-Status per 2026-11-16, branch `dev`. Dokumen ini menggantikan bagian
+Status per 2026-11-17, branch `dev`. Dokumen ini menggantikan bagian
 `docs/api.md` yang sudah tidak akurat (dokumen itu masih menjanjikan JWT tanpa
 endpoint login, error format JSON yang belum ada, dan path
 `/api/auth-credentials`).
@@ -17,20 +17,29 @@ endpoint login, error format JSON yang belum ada, dan path
 | Error | JSON envelope seragam, pesan internal tidak bocor |
 | Kredensial | AES-256-GCM at rest, `config` tidak pernah dikembalikan ke klien |
 | Password | bcrypt cost 12, timing uniform untuk user tidak dikenal |
-| Rate/limit | body 1 MiB, target ≤ 50, pagination ≤ 100/halaman |
-| Mesin scanning | tiap task menjalankan **satu** plugin dari registry embedded (9 plugin); temuan disimpan lewat `CreateBatch` |
+| Rate/limit | body 1 MiB, target ≤ 50, pagination ≤ 100/halaman; login: 5 percobaan per (klien+akun) dan 100 per klien dalam 15 menit, maksimum `GOMAXPROCS` verifikasi bcrypt bersamaan |
+| Mesin scanning | tiap task menjalankan **satu** plugin dari registry embedded (7 plugin); temuan disimpan lewat `CreateBatch` |
 | Guard jalur keluar | client hasil `ssrf.Guard.Client` dipakai detector **dan** crawler: IP diperiksa saat dial, redirect divalidasi ulang |
 | Batas keluar | budget request per scan (default 60 × jumlah target), rate limit per host (5 rps / burst 10), timeout task dari config |
 | Pembatalan | `POST /scans/{id}/cancel` membatalkan context scan, bukan hanya kolom status |
 | Crawl | `crawl` opsional per scan: link discovery same-domain, `max_depth`/`max_pages`/`robots.txt` benar-benar ditegakkan, URL temuan divalidasi ulang ke kebijakan SSRF |
-| Katalog template | `GET /api/templates` mengembalikan 9 plugin yang benar-benar dijalankan (bukan `[]`) |
+| Katalog template | `GET /api/templates` mengembalikan 7 plugin yang benar-benar dijalankan (bukan `[]`) |
 | Streaming | `GET /scans/{id}/stream` WebSocket nyata: `progress`/`finding`/`complete`/`failed`, ownership dicek sebelum upgrade |
 | Tiket remediasi | finding → tiket dengan severity/`scan_id` yang **diturunkan dari finding**, 8 endpoint (list/detail/create/status/assign/komentar/stats/overdue), status 5 tahap + SLA |
 | Siklus hidup scan | scan `pending`/`running` yang prosesnya mati ditandai `failed` dengan alasan (`interrupted_by_restart`, `interrupted_by_shutdown`, `heartbeat_lost`); heartbeat 15 detik, ambang 45 detik |
+| Integritas hasil | task yang tidak pernah mendapat respons dihitung gagal; semua task gagal → `failed` + `failure_reason=all_tasks_failed`; sebagian gagal → `completed` + `degraded: true` |
+| Pencabutan sesi | `POST /api/auth/logout` menaikkan `users.token_version`; setiap request membandingkan versi token dengan baris user, sekaligus memakai role/`is_active` dari DB (bukan dari token) |
+| Matcher header | `location: "header"` + `header_name` benar-benar membaca header; `no_redirect: true` menghentikan client di 3xx pertama |
 
 Masih **belum** (jangan diasumsikan jalan): engine headless (selalu error
 `ErrHeadlessNotImplemented`), export/download report PDF (501), RabbitMQ
-(ditolak saat startup), stream audit log (`/ws/logs`).
+(ditolak saat startup), stream audit log (`/ws/logs`), manajemen user, audit
+trail, autoscaling worker.
+
+Plugin `idor` dan `ssrf` **dihapus** (bukan diperbaiki): keduanya mencocokkan
+`status 200` yang juga dikembalikan halaman normal. `Plugin.Validate` sekarang
+menolak plugin yang satu-satunya bukti adalah status 2xx, jadi bentuk itu tidak
+bisa kembali tanpa sengaja.
 
 Catatan batas: crawl **hanya** link discovery. Brute-force path guessing ada di
 kode (`BruteForceDiscovery`) tetapi tidak bisa dipilih lewat API, karena satu
@@ -82,6 +91,10 @@ ber-versi (golang-migrate) dipasang.
 | `CRAWLER_MAXDURATIONSEC` | 60 | batas total fase crawl |
 | `CRAWLER_RESPECTROBOTS` | true | patuhi robots.txt |
 | `CRAWLER_USERAGENT` | `SentinelScan-Crawler/1.0` | |
+| `LOGIN_MAX_ATTEMPTS` | 5 | percobaan per (klien+akun) per window; sukses me-reset counter akun |
+| `LOGIN_MAX_IP_ATTEMPTS` | 100 | percobaan per klien lintas username (anti password spraying) |
+| `LOGIN_WINDOW_SECONDS` | 900 | panjang window throttle |
+| `LOGIN_MAX_CONCURRENCY` | `GOMAXPROCS` | jumlah verifikasi bcrypt bersamaan; 0 = default |
 
 ### Template selectors
 
@@ -91,8 +104,8 @@ Kosong berarti semua plugin. Term yang tidak dikenal → `400`, bukan scan semua
 plugin. Contoh: `xss`, `critical`, `sqli,xss-reflected`.
 
 Plugin yang tersedia (registry embedded `internal/infrastructure/detector/plugins`):
-`idor`, `open-redirect`, `path-traversal`, `sql-injection-error`,
-`sql-injection-boolean`, `sql-injection-time`, `ssrf`, `xss-reflected`, `xxe`.
+`open-redirect`, `path-traversal`, `sql-injection-error`, `sql-injection-boolean`,
+`sql-injection-time`, `xss-reflected`, `xxe`.
 
 ### Crawl
 
@@ -146,6 +159,16 @@ curl -s localhost:8080/api/scans -H "Authorization: Bearer $TOKEN"
 Semua endpoint `/api/*` (kecuali `/api/auth/login`) butuh Bearer token.
 Tanpa token → `401 {"error":{"code":"UNAUTHORIZED",...}}`.
 
+Setiap request terautentikasi membaca baris user (PK lookup) untuk memeriksa
+`token_version`, `is_active`, dan role. Konsekuensinya:
+
+- `POST /api/auth/logout` mencabut **semua** token user tersebut (bukan hanya
+  perangkat yang logout). Token yang dicabut → `401`.
+- Menonaktifkan atau menurunkan role user langsung berlaku, tanpa menunggu token
+  kedaluwarsa.
+- Kalau lookup DB gagal (bukan "user tidak ada"), jawabannya `503`, bukan `401`:
+  token yang benar tidak boleh dilaporkan rusak saat DB bermasalah.
+
 ## 4. Endpoint
 
 | Method | Path | Perilaku |
@@ -153,13 +176,14 @@ Tanpa token → `401 {"error":{"code":"UNAUTHORIZED",...}}`.
 | GET | `/health` | publik, tanpa auth |
 | POST | `/api/auth/login` | publik, `{username,password}` → `{token,expires_at,user}` |
 | GET | `/api/auth/me` | profil pemanggil |
+| POST | `/api/auth/logout` | 204; mencabut semua token pemanggil |
 | POST | `/api/scans` | 202 + scan; validasi SSRF; `auth_credential_id` harus milik pemanggil |
 | GET | `/api/scans` | pagination `page`,`page_size`,`status`; admin lihat semua |
-| GET | `/api/scans/{id}` | 404 jika bukan milik pemanggil |
+| GET | `/api/scans/{id}` | 404 jika bukan milik pemanggil; `degraded`/`truncated`/`failure_reason` ikut di respons |
 | POST | `/api/scans/{id}/cancel` | transisi status sah saja |
 | GET | `/api/scans/{id}/results` | `?limit=` (maks 1000) |
 | GET | `/api/scans/{id}/stream` | WebSocket `{type,data}`; token boleh lewat `?token=` (khusus route ini), `Origin` dicek terhadap allowlist |
-| GET | `/api/templates` | 9 plugin dengan filter `severity`,`tag`,`search` |
+| GET | `/api/templates` | 7 plugin dengan filter `severity`,`tag`,`search` |
 | GET/POST | `/api/credentials` | config selalu diredaksi jadi `{"configured":true}` |
 | GET/PUT/DELETE | `/api/credentials/{id}` | scoped ke pemilik; milik orang lain → 404/403 |
 | POST | `/api/credentials/{id}/verify` | fetch `verify_url` lewat client SSRF-safe |
@@ -186,6 +210,8 @@ Error selalu `{"error":{"code":"...","message":"..."}}` — bukan plain text.
 | SSRF guard + hardened client | `internal/security/ssrf/guard.go` |
 | Enkripsi kredensial | `internal/security/secretbox/secretbox.go` |
 | CORS allowlist | `internal/middleware/cors.go` |
+| Throttle login + batas konkurensi bcrypt | `internal/security/loginguard/guard.go` |
+| Pencabutan token (`tv`) + role dari DB | `internal/middleware/auth.go` |
 | Security headers (CSP, nosniff) | `internal/middleware/security.go` |
 | JSON/error envelope + body limit | `internal/httpx/respond.go` |
 | Password hashing + timing | `internal/security/passwd/passwd.go` |
@@ -210,6 +236,32 @@ Aturan yang harus dijaga saat menambah endpoint:
   event yang terbit di celah itu hilang dan test menjadi flaky.
 - Orchestrator `StopAll`: shutdown kini menulis status + alasan, bukan hanya
   membatalkan context (menyebabkan baris `running` abadi).
+- Crawl scope: `<form action>` lintas host dulu dikirim ke hasil **sebelum**
+  dicek scope, jadi crawl satu situs bisa menembak host pihak ketiga. Sekarang
+  dicek dulu, dan orchestrator menyaring ulang seluruh URL hasil crawl terhadap
+  scope sebelum URL menjadi target (dua lapis, karena provider bisa salah).
+- Detector: error transport per payload dulu di-`continue`, sehingga target yang
+  menolak semua koneksi tampak "bersih". Sekarang jumlah request yang dicoba/
+  berhasil/gagal dicatat (`detector.CheckStats`), dan engine mengembalikan
+  `ErrNoRequestCompleted` bila tidak ada satu pun respons.
+- Orchestrator: scan dengan 100% task gagal dulu ditandai `completed` tanpa
+  finding (laporan palsu "tidak ada kerentanan"). Sekarang `failed` +
+  `all_tasks_failed`; kegagalan sebagian menandai `degraded: true`.
+- Matcher `location: "header"` dulu tidak pernah membaca header (selalu body),
+  jadi plugin open-redirect tidak bisa match. Sekarang header dibaca lewat
+  `header_name`, dan plugin memakai canary `.invalid` + regex yang di-anchor agar
+  redirect internal yang hanya menggemakan URL tidak menjadi false positive.
+- Redirect: client produksi (`egress.Transport.Client`) dulu dibuat tanpa
+  `CheckRedirect`, sehingga validasi per-hop milik guard hilang dan port
+  allowlist bisa dilewati. Kebijakan itu dipasang kembali di `main.go`.
+- Login: tidak ada throttle. Sekarang `loginguard` membatasi per klien dan per
+  akun, membatasi verifikasi bcrypt bersamaan, dan menjaga tabel counter tetap
+  berbatas ukuran.
+- Token: tidak bisa dicabut. Sekarang `users.token_version` + endpoint logout;
+  role dan `is_active` juga diambil dari DB, bukan dari claim token.
+- `last_login`: dulu menulis ulang seluruh baris user, sehingga login yang
+  sedang berjalan bisa mengembalikan role/nonaktif yang baru diubah. Sekarang
+  hanya kolom `last_login`.
 
 Batas body respons sudah dikerjakan: `detector.MaxResponseBytes` dan
 `crawler.MaxBodyBytes` (2 MiB, ditandai `Truncated`). Belum: cleanup temp file PDF
@@ -230,6 +282,14 @@ Chromium dan `gofmt` untuk file lama yang tak tersentuh.
    heartbeat 15 detik/ambang 45 detik (`orchestrator/lifecycle.go`). Sisa
    terkait: kolom `failure_reason`/`heartbeat_at` baru ada lewat `AutoMigrate`,
    jadi ikut dipindahkan ke migrasi ber-versi pada butir 1.
+6. Manajemen user (create/list/nonaktifkan/reset/role) + audit trail. Tanpa ini
+   `user:manage` hanya dekorasi dan operator bergantung pada SQL manual.
+7. `/readyz` yang memeriksa DB + registry plugin, `slog` + request ID, metrics.
+8. Literasi utang test: 10 file `//go:build ignore` (119 test) dan `test/e2e`
+   yang tidak compile. E2E tidak pernah jalan di CI.
+9. Dead code: paket legacy `db/`, `detection/`, `event/`, `worker/`, `template/`
+   di root masih ikut build dan test; binary 21 MB `vulnerability-scanner` masih
+   ter-commit.
 
 ## 8. Utang keamanan: CVE dependensi (per 2026-11-16)
 

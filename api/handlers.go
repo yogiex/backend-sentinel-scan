@@ -15,6 +15,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/httpx"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/event"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/middleware"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/loginguard"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/ssrf"
 )
 
@@ -32,6 +33,9 @@ type Handler struct {
 	events *event.Bus
 	// allowedOrigins is the exact-match list accepted for WebSocket upgrades.
 	allowedOrigins map[string]struct{}
+	// loginGuard throttles password authentication. Nil disables throttling,
+	// which is only acceptable in tests and local development.
+	loginGuard *loginguard.Guard
 }
 
 // NewHandler builds the HTTP handler.
@@ -68,6 +72,12 @@ func (h *Handler) WithAllowedOrigins(origins []string) *Handler {
 // WithAuthIssuer enables the login endpoint.
 func (h *Handler) WithAuthIssuer(a *middleware.Auth) *Handler {
 	h.authIssuer = a
+	return h
+}
+
+// WithLoginGuard enables brute-force and CPU-exhaustion protection on login.
+func (h *Handler) WithLoginGuard(g *loginguard.Guard) *Handler {
+	h.loginGuard = g
 	return h
 }
 
@@ -148,15 +158,41 @@ func (h *Handler) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Username) == "" || req.Password == "" {
+	username := strings.TrimSpace(req.Username)
+	if username == "" || req.Password == "" {
 		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "username and password are required")
 		return
 	}
-	user, err := h.auth.Authenticate(r.Context(), req.Username, req.Password)
+
+	// Throttle before touching bcrypt: every verification is expensive, and an
+	// unauthenticated caller must not be able to spend that CPU at will.
+	clientIP := loginguard.ClientIP(r)
+	if h.loginGuard != nil {
+		if retry, allowed := h.loginGuard.Allow(clientIP, username); !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
+			httpx.Error(w, http.StatusTooManyRequests, "TOO_MANY_REQUESTS",
+				"Too many login attempts; try again later")
+			return
+		}
+		if !h.loginGuard.Acquire() {
+			w.Header().Set("Retry-After", "1")
+			httpx.Error(w, http.StatusTooManyRequests, "TOO_MANY_REQUESTS",
+				"Too many concurrent login attempts; try again")
+			return
+		}
+		defer h.loginGuard.Release()
+	}
+
+	user, err := h.auth.Authenticate(r.Context(), username, req.Password)
 	if err != nil {
 		// Uniform message: never reveal whether the account exists.
 		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid username or password")
 		return
+	}
+	if h.loginGuard != nil {
+		// A successful sign-in clears the per-account counter so a legitimate
+		// user is not locked out by their own earlier failures.
+		h.loginGuard.Reset(clientIP, username)
 	}
 	token, expires, err := h.authIssuer.Issue(user)
 	if err != nil {
@@ -183,6 +219,21 @@ func (h *Handler) MeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, userPayload{ID: user.ID, Username: user.Username, Email: user.Email, Role: user.Role})
+}
+
+// LogoutHandler revokes every token issued for the caller by bumping the user's
+// token version. It is idempotent: a second call returns 401 because the token
+// used for it was revoked by the first.
+func (h *Handler) LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	a, ok := actor(w, r)
+	if !ok {
+		return
+	}
+	if err := h.auth.Logout(r.Context(), a); err != nil {
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	httpx.NoContent(w)
 }
 
 // ── Scans ───────────────────────────────────────────────────

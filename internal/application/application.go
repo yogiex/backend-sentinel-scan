@@ -390,10 +390,27 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 	}
 	now := time.Now()
 	user.LastLogin = &now
-	if err := s.users.Update(ctx, user); err != nil {
+	// Only last_login: writing the whole row would let this login revert a role
+	// change or a deactivation that happened while the password was being
+	// verified.
+	if err := s.users.UpdateLastLogin(ctx, user.ID, now); err != nil {
 		log.Printf("[auth] last_login update failed: %v", err)
 	}
 	return user, nil
+}
+
+// Logout revokes every token issued for the actor by bumping the user's token
+// version. It is deliberately coarse: a user who logs out on one device ends
+// the session everywhere, which is the safe default for a scanner holding
+// credentials.
+func (s *AuthService) Logout(ctx context.Context, actor policy.Actor) error {
+	if actor.ID == 0 {
+		return apperr.ErrUnauthorized
+	}
+	if _, err := s.users.IncrementTokenVersion(ctx, actor.ID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *AuthService) GetByID(ctx context.Context, id uint) (*entity.User, error) {

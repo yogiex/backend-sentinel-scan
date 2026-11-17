@@ -22,6 +22,24 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ### Added
 
+- **[auth]** `POST /api/auth/logout` mencabut seluruh token user lewat kolom
+  `users.token_version`. Setiap request terautentikasi membandingkan `tv` di token
+  dengan baris user, dan mengambil role + `is_active` dari DB, sehingga logout,
+  demosi, dan penonaktifan berlaku seketika — bukan setelah token kedaluwarsa.
+- **[auth]** `internal/security/loginguard`: throttle login per klien dan per
+  (klien+akun), `429` + `Retry-After`, batas verifikasi bcrypt bersamaan, dan
+  tabel counter berbatas ukuran. `X-Forwarded-For` sengaja diabaikan.
+- **[scan]** `scan_jobs.degraded`: scan yang selesai tetapi sebagian task tidak
+  pernah mendapat respons kini jujur menyebut cakupannya parsial.
+- **[detector]** `CheckWithPlugins` mengembalikan `CheckStats`
+  (attempted/succeeded/failed) bersama hasil match; `MatchResponseWithHeaders`
+  membaca header respons.
+- **[detector]** dukungan `location: "header"` + `header_name` dan
+  `no_redirect: true` pada plugin; plugin open-redirect memakai canary
+  `.invalid` dengan regex yang di-anchor ke awal `Location`.
+- **[docs]** `docs/FEATURE-STATUS.md`: satu tabel status fitur sebagai sumber
+  kebenaran, menggantikan klaim "Production" yang tersebar.
+
 - **[scan]** Mesin scanning benar-benar menembak target: `HTTPEngine` menjadi
   adapter yang menjalankan **satu** plugin per task dari registry embedded
   (`RunWithPlugins` + `Registry.Get`), lalu memetakan hasilnya ke `Finding`.
@@ -69,6 +87,17 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ### Changed
 
+- **[detector]** plugin `idor` dan `ssrf` **dihapus**: keduanya hanya
+  mencocokkan `status 200`, yang juga dikembalikan halaman normal. Registry kini
+  7 plugin. `Plugin.Validate` menolak plugin yang satu-satunya matcher adalah
+  status 2xx, jadi bentuk itu tidak bisa kembali tanpa sengaja.
+- **[api]** `GET /api/scans/{id}` menyertakan `degraded`; frame WebSocket
+  `complete` menyertakan `degraded`, dan `failed` memakai `failure_reason`
+  sebagai `reason` alih-alih mengulang string status.
+- **[auth]** `last_login` ditulis lewat `UpdateLastLogin` (satu kolom), bukan
+  `Update` seluruh baris: login yang sedang berjalan tidak lagi bisa
+  mengembalikan role atau menonaktifkan user yang baru diubah.
+
 - **[scan]** Orchestrator menjadi satu-satunya penulis finding: result worker
   dipersist via `CreateBatch` di dispatch loop, worker tetap tanpa akses DB.
 - **[scan]** Timeout task diambil dari `worker.task_timeout` (bukan konstanta
@@ -95,6 +124,22 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ### Fixed
 
+- **[crawler]** `<form action>` lintas host dikirim ke hasil discovery
+  **sebelum** dicek scope, sehingga crawl satu situs bisa mengirim payload ke
+  host pihak ketiga. Sekarang dicek dulu, dan orchestrator menyaring ulang semua
+  URL hasil crawl terhadap scope sebelum menjadi target.
+- **[scan]** Scan dengan 100% task gagal dulu berakhir `completed` tanpa finding
+  — laporan palsu "tidak ada kerentanan". Sekarang `failed` +
+  `failure_reason=all_tasks_failed`; kegagalan sebagian menandai `degraded`.
+- **[detector]** Error transport per payload ditelan (`continue`), sehingga
+  timeout/koneksi ditolak tampak seperti target bersih. Sekarang dihitung, dan
+  engine mengembalikan `ErrNoRequestCompleted` bila tidak ada satu pun respons.
+- **[detector]** Matcher `location: "header"` tidak pernah membaca header
+  (selalu body), jadi plugin open-redirect tidak mungkin match.
+- **[security]** Client scan produksi dibuat tanpa `CheckRedirect`, menghapus
+  validasi per-hop milik SSRF guard; kebijakan dipasang kembali di `main.go`.
+- **[security]** Login tidak punya rate limit maupun batas konkurensi bcrypt.
+
 - **[scan]** Template `idor` dan `path-traversal` memakai path tanpa `?`
   (`/api/users/FUZZ&id=FUZZ`), sehingga semua parameter setelah `&` menjadi
   bagian path dan tiga dari empat titik injeksi tidak pernah diuji.
@@ -119,6 +164,12 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ### Security
 
+- **[auth]** Token kini dapat dicabut (`token_version`), dan role/status user
+  dibaca dari database pada setiap request.
+- **[auth]** Throttle login membatasi brute force dan password spraying, serta
+  mencegah endpoint login dipakai sebagai amplifier CPU (bcrypt cost 12).
+- **[security]** Port allowlist SSRF kembali berlaku pada setiap hop redirect.
+
 - **[scan]** Redirect dari target menuju `169.254.169.254`, `127.0.0.1`, atau
   `10.0.0.0/8` kini gagal di lapisan dial; sebelumnya diikuti sampai 10 hop.
 - **[scan]** Respons target dibatasi 2 MiB untuk mencegah kehabisan memori worker.
@@ -135,7 +186,23 @@ versi mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 - **[scan]** Status scan tidak lagi bisa berbohong selamanya: rekonsiliasi
   menghapus baris `running`/`pending` yatim, dan shutdown mencatat alasannya.
 
+### Docs
+
+- **[docs]** README ditulis ulang: status nyata, daftar fitur yang **tidak**
+  ada, dan instruksi yang cocok dengan kode.
+- **[docs]** `prd.md`, `srs.md`, `api.md`, `architecture.md`, `deployment.md`,
+  `testing.md`, dan `features/milestones.md` diberi banner historis; klaim
+  "Production" untuk auth-scanning/PDF/headless/RabbitMQ/autoscaling dihapus.
+- **[docs]** BACKEND-DEV: endpoint logout, env `LOGIN_*`, 7 plugin, integritas
+  hasil, dan daftar perbaikan diperbarui.
+
 ### Tests
+
+- **[tests]** Test baru: `detector/check_test.go`, `detector/matcher_header_test.go`,
+  `orchestrator/orchestrator_integrity_test.go`,
+  `orchestrator/orchestrator_scope_test.go`, `api/auth_test.go`,
+  `security/loginguard/guard_test.go`, plus kasus revocation/role-di-middleware
+  dan engine "target tidak terjangkau".
 
 - **[scan]** Test baru: budget/rate egress, validasi plugin, encoding payload,
   batas body, resolusi selector, engine satu-plugin-per-task, guard redirect

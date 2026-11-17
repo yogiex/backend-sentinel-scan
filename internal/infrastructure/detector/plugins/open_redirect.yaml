@@ -1,7 +1,7 @@
 metadata:
   id: "open-redirect"
   name: "Open Redirect"
-  description: "Detects unvalidated redirects via redirect parameters"
+  description: "Detects redirect parameters that send the browser to an attacker-controlled host"
   severity: "medium"
   tags: ["redirect", "open-redirect", "url"]
 
@@ -9,28 +9,24 @@ engine: "http"
 method: "GET"
 path: "/redirect?url=FUZZ&next=FUZZ&return=FUZZ&redirect=FUZZ"
 
+# The probe must see the 3xx itself: following the redirect hides the Location
+# header and turns a positive into a page load.
+no_redirect: true
+
+# The canary host is reserved by RFC 2606 and never resolves, so a target that
+# redirects to it is the only party that can produce this value.
 payloads:
-  - name: "external-http"
-    value: "http://evil.com"
-  - name: "external-https"
-    value: "https://evil.com"
-  - name: "protocol-relative"
-    value: "//evil.com"
+  - name: "canary"
+    value: "https://sentinel-scan-open-redirect.invalid/probe"
 
 matchers:
-  - type: "status"
+  # Anchored to the start of Location and to the canary host. A same-host login
+  # redirect such as /login?next=https://canary... also mentions the canary, and
+  # a substring match would report that as an open redirect.
+  - type: "regex"
     patterns:
-      - "301"
-      - "302"
-      - "303"
-      - "307"
-      - "308"
-    location: "status"
-    condition: "or"
-
-  - type: "keyword"
-    patterns:
-      - "Location: http://evil"
-      - "Location: //evil"
+      - "^https?://sentinel-scan-open-redirect\\.invalid"
+      - "^//sentinel-scan-open-redirect\\.invalid"
     location: "header"
+    header_name: "Location"
     condition: "or"

@@ -150,6 +150,45 @@ func TestLinkDiscovery_FormDiscovery(t *testing.T) {
 	assert.Contains(t, urls, server.URL)
 }
 
+// A page may contain a form whose action points at another host. Submitting it
+// is the page author's decision, not the caller's, so the crawl must neither
+// report it nor fetch it: doing so would send this scan's traffic and payloads
+// to a third party that never authorised anything.
+func TestLinkDiscovery_DropsCrossHostFormAction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>
+			<form action="https://elsewhere.invalid/collect" method="POST"></form>
+			<form action="/login" method="POST"></form>
+		</body></html>`)
+	}))
+	defer server.Close()
+
+	cfg := DefaultLinkConfig()
+	cfg.Enabled = true
+	cfg.MaxDepth = 1
+	cfg.MaxPages = 10
+	cfg.Timeout = 5 * time.Second
+	cfg.RateLimit = 0
+	cfg.Scope = ScopeSameDomain
+
+	infra := NewSharedInfra(CrawlConfig{Link: cfg})
+	provider := NewLinkDiscovery(cfg)
+
+	results := make(chan DiscoveredURL, 100)
+	provider.Start(context.Background(), []string{server.URL}, results, infra)
+	close(results)
+
+	var urls []string
+	for u := range results {
+		urls = append(urls, u.URL)
+	}
+
+	assert.NotContains(t, urls, "https://elsewhere.invalid/collect",
+		"a cross-host form action must never be reported as discovered")
+	assert.Contains(t, urls, server.URL+"/login",
+		"an in-scope form action is still discovered")
+}
+
 func TestLinkDiscovery_DepthLimit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

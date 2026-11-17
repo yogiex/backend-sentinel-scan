@@ -24,6 +24,11 @@ type ScanJob struct {
 	// Truncated reports that the scan stopped early because it hit its request
 	// budget. A truncated report is partial by design and must say so.
 	Truncated bool `json:"truncated"`
+	// Degraded reports that the scan finished but some tasks never produced a
+	// response, so their targets were not really checked. A degraded report is
+	// partial in a different way from a truncated one: "no findings" there
+	// means "not checked", not "clean".
+	Degraded bool `json:"degraded"`
 	// Crawl is the crawl configuration this scan was submitted with. It is
 	// persisted so the report can explain which pages were discovered and so a
 	// scan can be reproduced.
@@ -210,8 +215,12 @@ type User struct {
 	Role         Role       `json:"role"`
 	IsActive     bool       `json:"is_active"`
 	LastLogin    *time.Time `json:"last_login,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// TokenVersion is the server-side revocation counter. Every token carries
+	// the value it was issued with; incrementing this column invalidates all of
+	// them at once. It is never serialised.
+	TokenVersion int       `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Role string

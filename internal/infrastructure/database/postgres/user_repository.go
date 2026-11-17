@@ -2,6 +2,9 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -52,6 +55,41 @@ func (r *userRepository) FindByUsername(ctx context.Context, username string) (*
 		return nil, mapGormError(err)
 	}
 	return m.toEntity(), nil
+}
+
+func (r *userRepository) IncrementTokenVersion(ctx context.Context, id uint) (int, error) {
+	if r.db == nil {
+		return 0, errNoDB
+	}
+	// One statement, so two concurrent logouts cannot both read the same value
+	// and write the same bump. RETURNING gives the new version without a
+	// second round trip.
+	var version int
+	row := r.db.WithContext(ctx).Raw(
+		"UPDATE users SET token_version = token_version + 1, updated_at = now() WHERE id = ? AND deleted_at IS NULL RETURNING token_version",
+		id,
+	).Row()
+	if err := row.Scan(&version); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, apperr.ErrNotFound
+		}
+		return 0, err
+	}
+	return version, nil
+}
+
+func (r *userRepository) UpdateLastLogin(ctx context.Context, id uint, at time.Time) error {
+	if r.db == nil {
+		return errNoDB
+	}
+	res := r.db.WithContext(ctx).Model(&User{}).Where("id = ?", id).Update("last_login", at)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return apperr.ErrNotFound
+	}
+	return nil
 }
 
 func (r *userRepository) Update(ctx context.Context, u *entity.User) error {

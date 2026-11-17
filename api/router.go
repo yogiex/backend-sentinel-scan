@@ -37,6 +37,7 @@ func NewRouter(h *Handler, deps RouterDeps) http.Handler {
 
 	api := private.PathPrefix("/api").Subrouter()
 	api.HandleFunc("/auth/me", h.MeHandler).Methods(http.MethodGet)
+	api.HandleFunc("/auth/logout", h.LogoutHandler).Methods(http.MethodPost)
 
 	api.HandleFunc("/scans", h.CreateScan).Methods(http.MethodPost)
 	api.HandleFunc("/scans", h.ListScans).Methods(http.MethodGet)

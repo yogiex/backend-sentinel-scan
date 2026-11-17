@@ -51,6 +51,10 @@ type Plugin struct {
 	Payloads []Payload         `yaml:"payloads"`
 	Matchers []MatcherConfig   `yaml:"matchers"`
 	Baseline *BaselineRequest  `yaml:"baseline"`
+	// NoRedirect stops the executor at the first redirect so the response still
+	// carries the Location header. Without it Go follows the redirect and an
+	// open-redirect probe sees the final page instead of the evidence.
+	NoRedirect bool `yaml:"no_redirect"`
 }
 
 type BaselineRequest struct {
@@ -77,15 +81,27 @@ const (
 	MatcherStatus     MatcherType = "status"
 )
 
+// Matcher locations. "header" needs HeaderName; the other two are carried for
+// readability and to keep old plugin files valid.
+const (
+	MatcherLocationBody   = "body"
+	MatcherLocationStatus = "status"
+	MatcherLocationHeader = "header"
+)
+
 type MatcherConfig struct {
-	Type       MatcherType `yaml:"type"`
-	Patterns   []string    `yaml:"patterns"`
-	Location   string      `yaml:"location"`
-	Negative   bool        `yaml:"negative"`
-	Condition  string      `yaml:"condition"`
-	Comparison string      `yaml:"comparison"`
-	Threshold  int         `yaml:"threshold"`
-	Timeout    int         `yaml:"timeout"`
+	Type     MatcherType `yaml:"type"`
+	Patterns []string    `yaml:"patterns"`
+	Location string      `yaml:"location"`
+	// HeaderName selects the response header read when Location is "header".
+	// Without it a header matcher has nothing to read and would silently never
+	// match.
+	HeaderName string `yaml:"header_name"`
+	Negative   bool   `yaml:"negative"`
+	Condition  string `yaml:"condition"`
+	Comparison string `yaml:"comparison"`
+	Threshold  int    `yaml:"threshold"`
+	Timeout    int    `yaml:"timeout"`
 }
 
 type MatchResult struct {
@@ -108,6 +124,31 @@ type PluginResult struct {
 	// MaxResponseBytes, so a "not matched" verdict is not authoritative.
 	ResponseTruncated bool
 	Duration          time.Duration
+}
+
+// CheckStats reports how much of a check actually happened.
+//
+// A detector that returns only matches cannot tell "the target is clean" apart
+// from "every request failed", and the difference decides whether a report may
+// be trusted. Attempted counts issued requests, Succeeded counts requests that
+// produced any response (including 4xx/5xx), and Failed counts transport-level
+// failures such as timeouts, refused connections, and cancelled contexts.
+type CheckStats struct {
+	Attempted int
+	Succeeded int
+	Failed    int
+	// LastError is the most recent transport error, for the failure reason.
+	LastError error
+}
+
+// Checked reports that at least one request reached the target. Without this,
+// a plugin that matched nothing proves nothing.
+func (s CheckStats) Checked() bool { return s.Succeeded > 0 }
+
+// CheckResult is the outcome of running one or more plugins against a target.
+type CheckResult struct {
+	Matches []PluginResult
+	Stats   CheckStats
 }
 
 func DefaultDetectionConfig() DetectionConfig {

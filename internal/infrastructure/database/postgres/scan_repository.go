@@ -166,6 +166,23 @@ func (r *scanRepository) SetTruncated(ctx context.Context, id uint) error {
 	return nil
 }
 
+func (r *scanRepository) SetOutcome(ctx context.Context, id uint, degraded bool, failureReason string) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	res := r.db.WithContext(ctx).Model(&ScanJob{}).Where("id = ?", id).Updates(map[string]any{
+		"degraded":       degraded,
+		"failure_reason": failureReason,
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return apperr.ErrNotFound
+	}
+	return nil
+}
+
 func (r *scanRepository) TouchHeartbeat(ctx context.Context, id uint) error {
 	if err := r.ready(); err != nil {
 		return err

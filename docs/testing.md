@@ -1,4 +1,11 @@
-# SentinelScan Backend — Testing Guide
+# Testing (historical)
+
+> **Dokumen historis dan terlalu optimistis.** Klaim "14 E2E tests" tidak bisa
+> dijalankan: `test/e2e` tidak compile terhadap konstruktor saat ini, dan 10 file
+> test ber-`//go:build ignore` (119 `func Test`) tidak pernah dieksekusi
+> `go test ./...` — termasuk test JWT, user repository, dan handler kredensial.
+> Yang benar-benar berjalan: `go test ./... -count=1`. Lihat
+> [FEATURE-STATUS.md](FEATURE-STATUS.md) dan README bagian Testing.
 
 > **Stats:** ~290 test functions · 10 benchmarks · ~65 test files · 23+ packages
 

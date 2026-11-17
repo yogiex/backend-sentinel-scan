@@ -2,7 +2,7 @@
 //
 // @title           SentinelScan API
 // @version         1.0
-// @description     Vulnerability scanning engine powered by Nuclei templates.
+// @description     DAST engine with an embedded 7-probe plugin set, PostgreSQL persistence, and remediation tickets.
 // @termsOfService  https://github.com/inkubasi-btp-cybersecurity
 
 // @contact.name   SentinelScan Team
@@ -42,6 +42,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/config"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/application"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/repository"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/authscan"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/crawler"
 	dbpkg "github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/database/postgres"
@@ -51,6 +52,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/infrastructure/worker"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/middleware"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/egress"
+	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/loginguard"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/secretbox"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/security/ssrf"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/orchestrator"
@@ -116,6 +118,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Every authenticated request re-reads the user row so a logout, a
+	// deactivation, or a role change takes effect immediately instead of at
+	// token expiry.
+	authMW.WithUserState(userAuthState{users: userRepo})
+
+	// Login is the only unauthenticated write path, and bcrypt makes it
+	// expensive: throttle attempts and bound concurrent verifications.
+	loginGuard := loginguard.New(loginguard.Config{
+		MaxAttempts:   envInt("LOGIN_MAX_ATTEMPTS", 5),
+		MaxIPAttempts: envInt("LOGIN_MAX_IP_ATTEMPTS", 100),
+		Window:        time.Duration(envInt("LOGIN_WINDOW_SECONDS", 900)) * time.Second,
+		MaxConcurrent: envInt("LOGIN_MAX_CONCURRENCY", 0),
+	})
 
 	// ── Outbound scan traffic ───────────────────────────────
 	// One client for every worker. The SSRF guard validates the resolved IP at
@@ -129,6 +144,17 @@ func run() error {
 		Burst:         envInt("SCAN_RATE_BURST", 10),
 	})
 	scanClient := egressTransport.Client(time.Duration(cfg.Scanner.TimeoutSec) * time.Second)
+	// Rebuild the redirect policy here: egress.Transport.Client returns a plain
+	// client, which silently dropped the guard's per-hop validation. The IP is
+	// still checked at dial time; this restores the scheme/port allowlist on
+	// every hop.
+	scanClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return ssrf.ErrTooManyRedirects
+		}
+		_, err := guard.Parse(req.URL.String())
+		return err
+	}
 
 	scanDetector := detector.New(detector.DetectionConfig{
 		DefaultSeverity:      detector.SeverityInfo,
@@ -252,6 +278,7 @@ func run() error {
 	allowedOrigins := splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"))
 	handler := api.NewHandler(scanService, ticketService, authService, credService, reportService, guard).
 		WithAuthIssuer(authMW).
+		WithLoginGuard(loginGuard).
 		WithEventBus(eventBus).
 		WithAllowedOrigins(allowedOrigins)
 
@@ -288,6 +315,19 @@ func run() error {
 		defer shutdownCancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// userAuthState exposes the current user row to the auth middleware. It lives
+// here, at the composition root, so the middleware stays free of repository
+// dependencies and the application layer stays free of transport concerns.
+type userAuthState struct{ users repository.UserRepository }
+
+func (s userAuthState) AuthState(ctx context.Context, id uint) (middleware.UserState, error) {
+	u, err := s.users.FindByID(ctx, id)
+	if err != nil {
+		return middleware.UserState{}, err
+	}
+	return middleware.UserState{Version: u.TokenVersion, Role: u.Role, Active: u.IsActive}, nil
 }
 
 // orchestratorDispatcher adapts the orchestrator to application.ScanDispatcher.

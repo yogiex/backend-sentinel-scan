@@ -117,16 +117,23 @@ func (d *LinkDiscovery) worker(ctx context.Context, workerWg, taskWg *sync.WaitG
 			}
 
 			for _, form := range page.Forms {
-				if form.Action != "" && !infra.Dedup.IsVisited(form.Action) {
-					results <- DiscoveredURL{URL: form.Action, Depth: task.Depth + 1, Source: "form"}
-					if infra.Scope.Allows(form.Action, seedURLs) {
-						taskWg.Add(1)
-						select {
-						case tasks <- crawlTask{URL: form.Action, Depth: task.Depth + 1}:
-						default:
-							taskWg.Done()
-						}
-					}
+				if form.Action == "" || infra.Dedup.IsVisited(form.Action) {
+					continue
+				}
+				// Report and enqueue only what the scope allows. A <form
+				// action> points wherever the page's author chose, so a
+				// cross-host action is not the caller's authority to scan.
+				// Emitting it before this check turned one authorised crawl
+				// into traffic against a third party.
+				if !infra.Scope.Allows(form.Action, seedURLs) {
+					continue
+				}
+				results <- DiscoveredURL{URL: form.Action, Depth: task.Depth + 1, Source: "form"}
+				taskWg.Add(1)
+				select {
+				case tasks <- crawlTask{URL: form.Action, Depth: task.Depth + 1}:
+				default:
+					taskWg.Done()
 				}
 			}
 		}

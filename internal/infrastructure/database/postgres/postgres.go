@@ -22,6 +22,7 @@ type ScanJob struct {
 	TemplateSelectors datatypes.JSON `gorm:"type:jsonb"`
 	Status            string         `gorm:"type:varchar(20);not null;default:pending;index"`
 	Truncated         bool           `gorm:"not null;default:false"`
+	Degraded          bool           `gorm:"not null;default:false"`
 	CrawlEnabled      bool           `gorm:"not null;default:false"`
 	CrawlMaxDepth     int            `gorm:"not null;default:0"`
 	CrawlMaxPages     int            `gorm:"not null;default:0"`
@@ -92,6 +93,8 @@ type User struct {
 	LastName     string `gorm:"type:varchar(100)"`
 	IsActive     bool   `gorm:"not null;default:true"`
 	LastLogin    *time.Time
+	// TokenVersion invalidates outstanding tokens when it changes.
+	TokenVersion int `gorm:"not null;default:0"`
 }
 
 type AuditLog struct {
@@ -191,6 +194,7 @@ func (m *ScanJob) toEntity() *entity.ScanJob {
 		TemplateSelectors: decodeString(m.TemplateSelectors),
 		Status:            entity.ScanStatus(m.Status),
 		Truncated:         m.Truncated,
+		Degraded:          m.Degraded,
 		Crawl:             crawlFromModel(m),
 		Progress: &entity.ScanProgress{
 			TotalTasks: m.TotalTasks,
@@ -218,6 +222,7 @@ func scanFromEntity(e *entity.ScanJob) *ScanJob {
 		TemplateSelectors: encodeString(e.TemplateSelectors),
 		Status:            status,
 		Truncated:         e.Truncated,
+		Degraded:          e.Degraded,
 		AuthCredentialID:  e.AuthCredentialID,
 		FailureReason:     e.FailureReason,
 		HeartbeatAt:       e.HeartbeatAt,
@@ -326,6 +331,7 @@ func (m *User) toEntity() *entity.User {
 		Role:         entity.Role(m.Role),
 		IsActive:     m.IsActive,
 		LastLogin:    m.LastLogin,
+		TokenVersion: m.TokenVersion,
 		CreatedAt:    m.CreatedAt,
 		UpdatedAt:    m.UpdatedAt,
 	}
@@ -343,6 +349,7 @@ func userFromEntity(e *entity.User) *User {
 		Role:         role,
 		IsActive:     e.IsActive,
 		LastLogin:    e.LastLogin,
+		TokenVersion: e.TokenVersion,
 	}
 }
 

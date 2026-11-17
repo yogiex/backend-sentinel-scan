@@ -1,4 +1,11 @@
-# SentinelScan Backend — Deployment Guide
+# Deployment (historical)
+
+> **Dokumen historis, sebagian menyesatkan.** Nama environment variable di sini
+> (mis. `DATABASE_NAME`, `WORKER_POOL_SIZE`, `SCANNER_TIMEOUT_SEC`,
+> `RABBITMQ_AUTOSCALE_*`) tidak cocok dengan yang dibaca kode, langkah
+> "clone Nuclei templates" tidak relevan, dan tidak ada Dockerfile backend.
+> Gunakan [BACKEND-DEV.md](BACKEND-DEV.md#environment) untuk konfigurasi yang
+> benar dan [FEATURE-STATUS.md](FEATURE-STATUS.md) untuk status fitur.
 
 ---
 

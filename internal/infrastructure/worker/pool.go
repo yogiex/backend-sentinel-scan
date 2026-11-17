@@ -230,6 +230,7 @@ func (p *Pool) executeTask(task Task) Result {
 		ScanID:    task.ScanID,
 		Finding:   workerFinding,
 		Truncated: result.Truncated,
+		Checked:   result.Checked,
 		Error:     result.Error,
 	}
 }

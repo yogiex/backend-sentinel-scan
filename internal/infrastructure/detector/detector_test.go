@@ -98,10 +98,8 @@ func TestDetectorLoadAllPlugins(t *testing.T) {
 		"sql-injection-error":   false,
 		"xss-reflected":         false,
 		"path-traversal":        false,
-		"idor":                  false,
 		"open-redirect":         false,
 		"xxe":                   false,
-		"ssrf":                  false,
 		"sql-injection-boolean": false,
 		"sql-injection-time":    false,
 	}
@@ -125,8 +123,8 @@ func TestDetectorPluginCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load embedded plugins: %v", err)
 	}
-	if len(reg.List()) != 9 {
-		t.Errorf("expected 9 plugins, got %d", len(reg.List()))
+	if len(reg.List()) != 7 {
+		t.Errorf("expected 7 plugins, got %d", len(reg.List()))
 	}
 }
 
@@ -187,4 +185,3 @@ func TestDetectorGetTimePlugin(t *testing.T) {
 		t.Fatal("expected time plugin to have baseline config")
 	}
 }
-

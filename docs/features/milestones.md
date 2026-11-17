@@ -1,9 +1,19 @@
 # Milestone Development — SentinelScan Go Backend
 
-> ⚠️ **Tabel di bawah adalah target historis, bukan status berjalan.** Beberapa
-> baris ditandai ✅ padahal implementasinya masih stub (RabbitMQ ditolak saat
-> startup, PDF report belum ada, WebSocket baru aktif per 2026-11-17). Status
-> yang dapat dipercaya ada di [`docs/BACKEND-DEV.md`](../BACKEND-DEV.md) §1.
+> ⚠️ **Tabel di bawah adalah target historis, bukan status berjalan.** Baris
+> bertanda ✅ di sini **tidak** berarti selesai:
+>
+> - M2 "session manager + health checker" dan M4 "headless engine": stub/interface
+>   tanpa implementasi; authenticated scanning tidak pernah dipakai.
+> - M6 RabbitMQ: startup **menolak** `RABBITMQ_ENABLED=true`; publisher stub.
+> - M7 PDF generator: `report/generator.go` hanya struct kosong, endpoint `501`.
+> - M8 "migrator CLI": tidak ada; skema hanya lewat `AutoMigrate`.
+> - M10 "Dockerfile development/production/staging": tidak ada Dockerfile.
+> - M9 "13 integration tests + e2e": `test/e2e` tidak compile dan tidak jalan di CI.
+>
+> Status yang dapat dipercaya ada di
+> [`docs/FEATURE-STATUS.md`](../FEATURE-STATUS.md); kontrak teknis di
+> [`docs/BACKEND-DEV.md`](../BACKEND-DEV.md).
 
 | # | Milestone | Fase | Selesai | Poin Utama |
 |---|-----------|------|---------|------------|
@@ -22,11 +32,11 @@
 
 | Metrik | Angka |
 |--------|-------|
-| Total test functions | ~275 |
-| Benchmark functions | 10 |
-| Test files | ~60 |
-| Packages lulus `go test ./...` | 23/23 |
-| Packages lulus `go vet ./...` | 23/23 |
+| Package yang dibangun `go build ./...` | 26 |
+| File test | 59 |
+| File test yang benar-benar jalan | 49 (10 ber-`//go:build ignore`, 119 `func Test`) |
+| Suite e2e | tidak compile; tidak pernah jalan di CI |
+| Benchmark functions | 1 file benchmark; `go test ./...` hanya melaporkan "no tests to run" |
 
 ## Tersisa (Non-Bloking)
 

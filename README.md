@@ -1,746 +1,194 @@
 # SentinelScan Backend
 
-> A high-performance vulnerability scanning engine powered by Nuclei templates, with credential vault and on-demand PDF reporting.
+A dynamic application security scanner written in Go: HTTP probes over a small
+embedded plugin set, optional same-domain crawling, PostgreSQL persistence,
+ticket-based remediation, and a WebSocket stream for live results.
+
+> **Status: alpha, not production-ready.** Several headline features from earlier
+> documents were never implemented. The authoritative list lives in
+> [docs/FEATURE-STATUS.md](docs/FEATURE-STATUS.md); read it before promising a
+> capability. The developer-facing contract (in Indonesian) is
+> [docs/BACKEND-DEV.md](docs/BACKEND-DEV.md).
 
 [![Go Version](https://img.shields.io/badge/Go-1.25.10+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> Perubahan terbaru: lihat [CHANGELOG.md](CHANGELOG.md).
+## What actually works
 
-## Overview
+| Area | Status | Notes |
+|---|---|---|
+| HTTP scanning | Works | 7 embedded plugins: XSS, SQLi (error/boolean/time), path traversal, open redirect, XXE |
+| Crawling | Works | Same-domain link discovery; `max_depth`, `max_pages`, `robots.txt` enforced |
+| Result integrity | Works | All tasks failed → scan `failed`; partial transport failure → `degraded: true` |
+| Tickets | Works | 8 endpoints, 5-state machine, derived severity, SLA, comments, stats, overdue |
+| Scan lifecycle | Works | Heartbeat reconciliation: restart/shutdown/lost-heartbeat scans become `failed` with a reason |
+| Auth | Works | JWT HS256, 4 roles, ownership checks, login throttling, token revocation via `token_version` |
+| Credential vault | Storage only | AES-256-GCM at rest, but the scanner does **not** use credentials yet |
+| Report data | Works | `GET /api/scans/{id}/report-data` returns findings + severity summary |
+| Live stream | Works | WebSocket `{type,data}` with snapshot catch-up |
 
-SentinelScan Backend is a DAST (Dynamic Application Security Testing) engine that enables authenticated vulnerability scanning, real-time result streaming, and on-demand PDF report generation. Inspired by enterprise scanners like Tenable Web App Scanner and Nessus.
+## What does not work (and is not claimed)
 
-- **Concurrent vulnerability scanning** using a configurable worker pool with autoscaling
-- **Authenticated scanning** via credential vault (login form, cookie, bearer token, API key, Selenium)
-- **Credential health monitoring** with automatic re-authentication
-- **On-demand PDF reports** generated via headless Chrome (chromedp)
-- **Real-time result streaming** via WebSocket connections
-- **Nuclei template integration** for industry-standard detection rules
-- **Event-driven architecture** with pub/sub messaging (in-memory + RabbitMQ)
-- **Persistent storage** with PostgreSQL (GORM)
-- **Role-based access control** (RBAC) with granular permissions
-
-## Features
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| Active Vulnerability Scanning | ✅ Production | Scan targets using Nuclei YAML templates |
-| Concurrent Worker Pool | ✅ Production | Configurable parallelism with autoscaling |
-| Credential Vault | ✅ Production | M:N reusable auth credentials (login_form, cookie, bearer, api_key, selenium) |
-| Authenticated Scanning | ✅ Production | Session manager with health checker & automatic re-auth |
-| PDF Report Generation | ✅ Production | On-demand hybrid (HTML+chromedp) A4 PDF export |
-| Report Data API | ✅ Production | Structured JSON scan report aggregation |
-| Real-time Streaming | ✅ Production | WebSocket endpoint for live scan results |
-| Template Management | ✅ Production | Load, filter, and execute Nuclei templates |
-| PostgreSQL Persistence | ✅ Production | GORM-based ORM with AutoMigrate + SQL migrations |
-| Event-Driven Architecture | ✅ Production | Decoupled pub/sub with RabbitMQ fallback to in-memory |
-| RBAC System | ✅ Production | Roles: admin, security_analyst, auditor, viewer |
-| Scan Scheduling | 🔄 Planned | Cron-based recurring scan scheduling |
-| Scope & Advanced Settings | 🔄 Planned | Include/exclude URLs, rate limiting, timeouts |
-| API Scanning | 🔄 Planned | OpenAPI-based API endpoint fuzzing |
-| CVE/NVD Integration | 🔄 Planned | Enrich findings with CVE database info |
-| EPSS Integration | 🔄 Planned | Exploit Prediction Scoring System |
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| **Language** | Go 1.21+ |
-| **HTTP Router** | gorilla/mux |
-| **WebSocket** | gorilla/websocket |
-| **Configuration** | spf13/viper |
-| **Database ORM** | GORM |
-| **Database** | PostgreSQL |
-| **Message Queue** | RabbitMQ (with in-memory fallback) |
-| **Headless Browser** | chromedp / cdproto |
-| **Vulnerability Engine** | Nuclei templates |
-| **PDF Generation** | chromedp `Page.printToPDF` |
-| **Authentication** | JWT + bcrypt |
-| **Testing** | testify |
-| **Concurrency** | Native goroutines + channels |
+- **Authenticated scanning.** A credential can be stored but never used: no login
+  executor exists and no cookie/header is injected into scan requests.
+- **PDF export/download.** Both endpoints return `501`; the generator is empty.
+- **Headless/browser engine.** The engine is a stub that returns an error.
+- **RabbitMQ / worker autoscaling.** The broker path is refused at startup; the
+  autoscaler is a no-op.
+- **Nuclei template compatibility.** The engine runs its own small plugin format.
+- **User management.** There is no users API; the only accounts are the bootstrap
+  admin and rows inserted with SQL.
+- **Audit trail.** The table and repository exist, but nothing writes to them.
 
 ## Architecture
 
-SentinelScan follows **Domain-Driven Design (DDD)** with hexagonal architecture layers:
-
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     API / Transport Layer                      │
-│  api/ (HTTP handlers, routes, WebSocket, swagger)            │
-└──────────────────────────────────────────────────────────────┘
-                                ↓
-┌──────────────────────────────────────────────────────────────┐
-│                    Application Layer                           │
-│  internal/application/                                        │
-│  ├── scan_service.go       (scan lifecycle)                   │
-│  ├── auth_service.go       (user auth)                        │
-│  ├── auth_credential_service.go  (credential vault)           │
-│  ├── ticket_service.go     (remediation tickets)              │
-│  └── report_service.go     (report data aggregation)          │
-└──────────────────────────────────────────────────────────────┘
-                                ↓
-┌──────────────────────────────────────────────────────────────┐
-│                      Domain Layer                              │
-│  internal/domain/                                             │
-│  ├── entity/     (ScanJob, Finding, AuthCredential, Report)   │
-│  ├── repository/ (interfaces: Scan, Finding, AuthCred, etc.)  │
-│  └── service/    (domain services, planned)                   │
-└──────────────────────────────────────────────────────────────┘
-                                ↓
-┌──────────────────────────────────────────────────────────────┐
-│                   Infrastructure Layer                         │
-│  internal/infrastructure/                                     │
-│  ├── database/postgres/  (GORM repositories)                  │
-│  ├── scanner/            (HTTP + headless engines)            │
-│  ├── authscan/           (credential executors + session mgr) │
-│  ├── auth/               (JWT + bcrypt)                       │
-│  ├── worker/             (pool + autoscaler)                  │
-│  ├── messaging/          (RabbitMQ pub/sub)                   │
-│  ├── event/              (in-memory event bus)                │
-│  └── report/             (PDF + HTML template)                │
-└──────────────────────────────────────────────────────────────┘
-                                ↓
-┌──────────────────────────────────────────────────────────────┐
-│                   External Integrations                        │
-│  PostgreSQL / RabbitMQ / chromedp / Nuclei templates          │
-└──────────────────────────────────────────────────────────────┘
+api/            HTTP transport: handlers, router, WebSocket stream
+internal/
+  application/  use cases: scan, ticket, auth, credential, report
+  domain/       entity, policy (RBAC + ownership), repository interfaces
+  infrastructure/
+    database/postgres/  GORM models and repositories
+    crawler/            link discovery, robots, scope, dedupe
+    detector/           plugin registry, matchers, HTTP executor, plugins/*.yaml
+    scanner/            per-task engine (one plugin per task)
+    worker/             bounded worker pool
+    event/              in-memory pub/sub for the stream
+  security/     ssrf guard, egress budget/rate limit, secretbox, passwd, loginguard
+  middleware/   auth (JWT + revocation), CORS, security headers
+orchestrator/   scan lifecycle, progress, reconciliation
+main.go         composition root
 ```
 
-### Data Flow — Standard Scan
+Design rules that matter when changing this code:
 
-```
-Client POST /api/scans  { targets, template_selectors, auth_credential_id? }
-    ↓
-API Handler.CreateScan()
-    ↓
-ScanService.StartScan() – persist to DB [status: "pending"]
-    ↓
-[optional] SessionManager.StartSession() – authenticate + start health checker
-    ↓
-Orchestrator.StartScan() – update status to "running"
-    ↓
-Load Templates (TemplateLoader) → filter by selectors
-    ↓
-Create Tasks (target × template) → enqueue to task queue
-    ↓
-Worker Pool → resolveSession() → attach cookies/headers from session
-    ↓
-HTTPEngine / HeadlessEngine executes task
-    ↓
-Results → FindingRepository.CreateBatch() + EventBus.Publish()
-    ↓
-WebSocket streams findings to clients in real-time
-    ↓
-All tasks complete → status → "completed"
+1. The orchestrator is the single writer of findings; workers never touch the DB.
+2. Every outbound request goes through the SSRF-guarded, budget-aware client.
+3. Status changes go through the state machine (`UpdateStatus`), never a bare
+   column update.
+4. Ownership is enforced in the query (`FindByIDOwned`), not only in the handler.
+
+## Quick start
+
+```bash
+docker-compose up -d postgres
+
+export DATABASE_HOST=127.0.0.1
+export JWT_SECRET="at-least-32-characters-long-change-me"
+export CRED_ENC_KEY="separate-key-for-credential-encryption"
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='a-strong-password-8+'
+export CORS_ALLOWED_ORIGINS="http://localhost:5173"
+
+go run .
 ```
 
-### Data Flow — PDF Report (On-Demand)
+Server listens on `http://localhost:8080`. The schema is created by `AutoMigrate`
+on boot (see the migration caveat below).
 
+Local build caches, when `$HOME` is not writable:
+
+```bash
+export GOCACHE=$PWD/.gocache GOMODCACHE=$PWD/.gomodcache
+export GOFLAGS=-mod=mod GOTOOLCHAIN=local GOTMPDIR=$PWD/.gotmp
 ```
-Client POST /api/scans/{id}/report/export
-    ↓
-ReportService.GetReportData() – aggregate scan + findings
-    ↓
-ReportGenerator.GeneratePDF()
-    ├── RenderHTML(template.go → templates/report.html)
-    └── PDFGenerator (chromedp Page.printToPDF → A4)
-    ↓
-PDF cached to ./reports/scan_{id}.pdf
-    ↓
-    Response → { status: "ready", download_url: "/api/scans/{id}/report/download" }
-```
-
-## Quick Start
-
-### Prerequisites
-
-- Go 1.25 or higher
-- PostgreSQL 12+
-- Nuclei templates (cloned to `./templates/`)
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/inkubasi-btp-cybersecurity/vulnerability-scanner.git
-   cd vulnerability-scanner/code/backend-golang
-   ```
-
-2. **Install dependencies**
-   ```bash
-   go mod download
-   ```
-
-3. **Configure the application**
-   ```bash
-   # Uses environment variables or config.yaml (optional)
-   cp deployments/development/.env.example .env
-   # Or set environment variables directly (see table below)
-   ```
-
-4. **Set up the database**
-   ```bash
-   # Create PostgreSQL database
-   createdb vulnscanner
-   ```
-
-5. **Download Nuclei templates**
-   ```bash
-   git clone https://github.com/projectdiscovery/nuclei-templates.git ./templates
-   ```
-
-6. **Run the application**
-   ```bash
-   go run main.go
-   ```
-
-The server will start on `http://localhost:8080` by default.
 
 ## Configuration
 
-SentinelScan uses **Viper** for configuration management, supporting both YAML files and environment variables.
-
-### Configuration File (`config.yaml`)
-
-```yaml
-server:
-  host: localhost
-  port: 8080
-
-database:
-  host: localhost
-  port: 5432
-  user: postgres
-  password: postgres
-  dbname: vulnscanner
-  sslmode: disable
-
-worker:
-  size: 50            # Worker pool size
-  maxretries: 3       # Max retry attempts per task
-  tasktimeout: 30     # Task timeout in seconds
-  autoscale:
-    enabled: false
-    minworkers: 5
-    maxworkers: 100
-    scaleupthreshold: 5
-    scaledownthreshold: 1
-
-template:
-  dir: ./templates    # Path to Nuclei templates
-
-scanner:
-  chromium_path: ""   # Path to Chromium for headless engine
-  timeout_sec: 15     # Scanner timeout per request
-  headless_size: 10   # Headless worker pool size
-
-authscan:
-  session_check_interval: 30  # Health check interval (seconds)
-  verify_timeout: 10           # Session verification timeout
-  max_retries: 3               # Max re-auth retries
-
-report:
-  output_dir: ./reports  # PDF report output directory
-
-rabbitmq:
-  host: localhost
-  port: 5672
-  user: admin
-  password: admin
-  vhost: /
-  prefetch_count: 10
-```
-
-### Environment Variables
-
-All configuration options can be overridden via environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SERVER_HOST` | Server host | `localhost` |
-| `SERVER_PORT` | Server port | `8080` |
-| `DATABASE_HOST` | PostgreSQL host | `localhost` |
-| `DATABASE_PORT` | PostgreSQL port | `5432` |
-| `DATABASE_USER` | PostgreSQL user | `postgres` |
-| `DATABASE_PASSWORD` | PostgreSQL password | `postgres` |
-| `DATABASE_DBNAME` | PostgreSQL database | `vulnscanner` |
-| `WORKER_SIZE` | Worker pool size | `50` |
-| `WORKER_MAXRETRIES` | Max task retries | `3` |
-| `WORKER_TASKTIMEOUT` | Task timeout (seconds) | `30` |
-| `SCANNER_CHROMIUM_PATH` | Chromium binary path | `""` |
-| `SCANNER_TIMEOUT_SEC` | Scanner timeout | `15` |
-| `SCANNER_HEADLESS_SIZE` | Headless workers | `10` |
-| `AUTHSCAN_SESSION_CHECK_INTERVAL` | Session health check interval (s) | `30` |
-| `AUTHSCAN_VERIFY_TIMEOUT` | Session verify timeout (s) | `10` |
-| `AUTHSCAN_MAX_RETRIES` | Re-auth retries | `3` |
-| `REPORT_OUTPUT_DIR` | PDF report output path | `./reports` |
-| `RABBITMQ_HOST` | RabbitMQ host | `localhost` |
-| `RABBITMQ_PORT` | RabbitMQ port | `5672` |
-| `RABBITMQ_USER` | RabbitMQ user | `admin` |
-| `RABBITMQ_PASSWORD` | RabbitMQ password | `admin` |
-| `TEMPLATE_DIR` | Nuclei templates path | `./templates` |
-
-## API Documentation
-
-### Base URL
-
-```
-http://localhost:8080/api
-```
-
-### Scan Endpoints
-
-#### Create a Scan
-
-```http
-POST /api/scans
-Content-Type: application/json
-
-{
-  "targets": ["http://example.com", "https://test.com"],
-  "template_selectors": "{\"severity\":[\"high\",\"critical\"]}"
-}
-```
-
-**With credential (authenticated scanning):**
-
-```http
-POST /api/scans
-Content-Type: application/json
-
-{
-  "targets": ["https://example.com"],
-  "template_selectors": {"severity": ["high", "critical"]},
-  "auth_credential_id": 1
-}
-```
-
-**Response (201 Created)**
-```json
-{
-  "id": 1,
-  "targets": ["http://example.com"],
-  "template_selectors": {"severity": ["high", "critical"]},
-  "status": "pending",
-  "auth_credential_id": 1,
-  "created_at": "2026-05-04T10:00:00Z",
-  "updated_at": "2026-05-04T10:00:00Z"
-}
-```
-
-#### Get Scan Status
-
-```http
-GET /api/scans/{id}
-```
-
-**Response (200 OK)**
-```json
-{
-  "id": 1,
-  "targets": ["http://example.com"],
-  "status": "running",
-  "progress": {
-    "total_tasks": 100,
-    "completed": 45,
-    "failed": 2,
-    "in_progress": 53
-  },
-  "auth_credential_id": 1,
-  "created_at": "2026-05-04T10:00:00Z"
-}
-```
-
-#### Get Scan Results
-
-```http
-GET /api/scans/{id}/results
-```
-
-#### Stream Real-time Results (WebSocket)
-
-```javascript
-const ws = new WebSocket('ws://localhost:8080/api/scans/1/stream');
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log('Event:', data.type); // finding, progress, complete, failed
-  console.log('Data:', data.payload);
-};
-```
-
-**Event Types:**
-
-| Type | Description |
-|------|-------------|
-| `finding` | Vulnerability detected |
-| `progress` | Scan progress update (total/completed) |
-| `complete` | Scan finished successfully |
-| `failed` | Scan failed with error |
-
-### Credential Vault Endpoints
-
-#### List Credentials
-
-```http
-GET /api/credentials
-```
-
-#### Create Credential
-
-```http
-POST /api/credentials
-Content-Type: application/json
-
-{
-  "name": "My Login Form",
-  "method": "login_form",
-  "config": {
-    "login_url": "https://example.com/login",
-    "fields": [
-      {"selector": "username", "type": "text", "value": "admin"},
-      {"selector": "password", "type": "password", "value": "secret123"}
-    ],
-    "submit_selector": "button[type=submit]"
-  },
-  "verify_url": "https://example.com/dashboard",
-  "verify_pattern": "Welcome, admin"
-}
-```
-
-**Supported auth methods:**
-| Method | Config Structure | Use Case |
-|--------|-----------------|----------|
-| `login_form` | `login_url`, `fields[]`, `submit_selector` | Login page with form |
-| `cookie` | `cookies[]` (name, value, domain, path) | Session cookie replay |
-| `bearer` | `token` (string) | Bearer token auth |
-| `api_key` | `headers[]` (name, value) | API key in header |
-| `selenium` | `script_path` | Complex browser auth |
-
-#### Get Credential
-
-```http
-GET /api/credentials/{id}
-```
-
-#### Update Credential
-
-```http
-PUT /api/credentials/{id}
-```
-
-#### Delete Credential
-
-```http
-DELETE /api/credentials/{id}
-```
-
-#### Verify Credential
-
-```http
-POST /api/credentials/{id}/verify
-```
-
-Verifies the credential by performing a test authentication against the target.
-
-### Report Endpoints
-
-#### Get Report Data (JSON)
-
-```http
-GET /api/scans/{id}/report-data
-```
-
-Returns structured scan report with findings grouped by severity and template.
-
-#### Export Report (PDF)
-
-```http
-POST /api/scans/{id}/report/export
-```
-
-Generates a PDF report via headless Chrome. Returns `"download_url"` when ready. PDF is cached on disk — subsequent requests return immediately.
-
-**Response:**
-```json
-{
-  "status": "ready",
-  "download_url": "/api/scans/1/report/download"
-}
-```
-
-#### Download Report
-
-```http
-GET /api/scans/{id}/report/download
-```
-
-Downloads the generated PDF report (if it exists).
-
-### Template Endpoints
-
-#### List Templates
-
-```http
-GET /api/templates?severity=critical,high&tags=cicd
-```
-
-#### Get Template Details
-
-```http
-GET /api/templates/{id}
-```
-
-## Project Structure
-
-```
-backend-golang/
-├── main.go                       # Application entry point
-│
-├── api/                          # HTTP & WebSocket transport
-│   ├── handlers.go               # Core scan/template handlers
-│   ├── handlers_extended.go      # Credential vault CRUD, report handlers
-│   ├── router.go                 # Route definitions (single source of truth)
-│   ├── handlers_test.go          # Handler tests
-│   └── handlers_extended_test.go # Extended handler tests
-│
-├── config/                       # Configuration
-│   └── config.go                 # Viper loader (YAML + env)
-│
-├── db/                           # Database models & connection
-│   ├── models.go
-│   └── connection.go
-│
-├── detection/                    # Detection engine
-│   └── fingerprint.go            # Version fingerprinting
-│
-├── docs/                         # Documentation
-│   ├── architecture.md
-│   ├── api.md
-│   ├── testing.md
-│   ├── deployment.md
-│   └── features/                 # Feature development plans
-│
-├── event/                        # In-memory event bus (pub/sub)
-│   └── bus.go
-│
-├── internal/
-│   ├── domain/
-│   │   ├── entity/               # AuthCredential, AuthSession, ScanReportData, User, Ticket
-│   │   └── repository/           # Repository interfaces (Scan, Finding, Ticket, User, etc.)
-│   ├── application/
-│   │   └── application.go         # Stub services (ScanService, AuthService, ReportService, etc.)
-│   └── infrastructure/
-│       ├── auth/                 # JWT + bcrypt (test-only)
-│       ├── authscan/             # Session manager, credential executors (stub)
-│       ├── database/postgres/    # GORM repositories (stub)
-│       ├── event/                # Infrastructure event bus
-│       ├── messaging/            # RabbitMQ pub/sub (stub)
-│       ├── report/               # PDF report generator (stub)
-│       ├── scanner/              # HTTP + headless engines (stub)
-│       └── worker/               # Pool + autoscaler
-│
-├── orchestrator/                 # Scan job coordination
-├── pkg/errors/                   # Custom error types (AppError)
-├── template/                     # Nuclei template types + loader
-├── worker/                       # Task/Result types
-├── test/                         # Integration, benchmark & E2E tests
-│   ├── integration/              # Build tag: integration
-│   ├── benchmarks/               # Go benchmarks
-│   └── e2e/                      # Build tag: e2e
-│       ├── testutil/             # Shared test helpers (NewTestServer, MustGET, etc.)
-│       ├── health/
-│       ├── scans/
-│       ├── credentials/
-│       ├── templates/
-│       ├── reports/
-│       └── auth/                 # Pending — routes not yet registered
-├── docs/                         # All documentation
-│   ├── agents.md                 # Agent instructions
-│   ├── prd.md                    # Product requirements
-│   ├── srs.md                    # Software requirements spec
-│   ├── architecture.md
-│   ├── api.md
-│   ├── testing.md
-│   ├── deployment.md
-│   └── features/
-└── README.md                     # This file
-```
-
-## Test Coverage
-
-**Status: ✅ All non-main packages compile. `go vet ./...` passes on non-test-only packages.**
-
-| Package | Tests | Status |
-|---------|-------|--------|
-| `pkg/errors` | ✅ Full coverage | 100% |
-| `config` | ✅ Full coverage | 97.6% |
-| `internal/infrastructure/event` | ✅ Good coverage | 90.5% |
-| `template` | ✅ Good coverage | 71.8% |
-| `internal/infrastructure/auth` | ✅ Good coverage | ~70% |
-| `internal/infrastructure/authscan` | ✅ Good coverage | ~70% |
-| `internal/domain/entity` | 🟡 Moderate | ~65% |
-| `internal/application` | 🟡 Moderate | ~55% |
-| `internal/infrastructure/messaging` | 🟡 Moderate | ~40% |
-| `internal/infrastructure/scanner` | 🟡 Moderate | ~25% |
-| `api` | 🟡 Moderate | ~45% |
-| `orchestrator` | 🟡 Growing | ~30% |
-| `test/e2e` | 🟢 14 tests | All passing |
-| Remaining packages | 🟡 Various | 20–50% |
-
-~290 test functions · 10 benchmarks · ~65 test files · 5 dispatch loop tests
-
-### Running Tests
+The full table is in [docs/BACKEND-DEV.md](docs/BACKEND-DEV.md#environment). The
+ones that change behaviour the most:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `JWT_SECRET` | random per boot | signing key; random means every restart logs everybody out |
+| `CRED_ENC_KEY` | falls back to `JWT_SECRET` | credential encryption key; random fallback makes stored credentials unrecoverable |
+| `JWT_TTL_MINUTES` | 15 | access-token lifetime |
+| `ADMIN_PASSWORD` | empty | empty skips admin bootstrap entirely |
+| `LOGIN_MAX_ATTEMPTS` | 5 | attempts per client+username per window |
+| `LOGIN_MAX_IP_ATTEMPTS` | 100 | attempts per client across usernames (spraying) |
+| `LOGIN_WINDOW_SECONDS` | 900 | throttle window |
+| `LOGIN_MAX_CONCURRENCY` | `GOMAXPROCS` | simultaneous bcrypt verifications |
+| `SSRF_ALLOW_PRIVATE` | false | never enable outside a lab |
+| `SCAN_RATE_PER_SECOND` / `SCAN_RATE_BURST` | 5 / 10 | per-host outbound rate |
+| `SCAN_MAX_REQUESTS_PER_TARGET` | 60 | request budget per target |
+| `RABBITMQ_ENABLED` | false | setting it to true makes startup fail on purpose |
+
+The login throttle is in-memory. It is correct for a single replica and can be
+bypassed by spreading attempts across replicas.
+
+## API
+
+29 routes; the full table with behaviour is in
+[docs/BACKEND-DEV.md](docs/BACKEND-DEV.md#4-endpoint). Everything under `/api`
+requires `Authorization: Bearer <token>` except `POST /api/auth/login`.
+`GET /health` is public and is a liveness check only: it does not verify the
+database.
+
+Errors are always `{"error":{"code":"...","message":"..."}}`.
+
+## Security posture
+
+Implemented:
+
+- SSRF guard validates the resolved IP at dial time (defeats DNS rebinding) and
+  re-validates scheme/port on every redirect hop.
+- Per-host rate limiting and a per-scan request budget shared by crawler and
+  detector.
+- JWT: HS256 pinned, `alg:none` rejected, expiry required, issuer validated.
+- Permissions are derived from the role on every request; the token cannot widen
+  them, and a role change or deactivation applies immediately.
+- Login throttling plus a bounded counter table (the limiter itself cannot be
+  turned into a memory exhaustion vector).
+- Passwords: bcrypt cost 12, uniform timing for unknown users.
+- Credential secrets: AES-256-GCM, never returned to clients (`config` is
+  redacted to `{"configured":true}`).
+- Response bodies truncated at 2 MiB; request bodies at 1 MiB.
+
+Known gaps (tracked, not hidden):
+
+- Credential encryption key is not backed by a KMS and falls back to
+  `JWT_SECRET`; rotating either makes existing ciphertext unreadable.
+- `GET /api/scans/{id}/report-data` loads up to 5,000 findings without pagination.
+- No foreign keys in the schema; deleting a scan does not clean up tickets.
+- No audit trail, metrics, or structured logging.
+
+## Testing
 
 ```bash
-# Run all unit tests
-go test ./...
-
-# Run tests with race detector
-go test -race -count=1 ./...
-
-# Run tests with coverage
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out -o coverage.html
-
-# Run specific package tests
-go test -count=1 -v ./internal/application/...
-
-# Run E2E tests (standalone, no external services required)
-go test -tags=e2e -count=1 ./test/e2e/...
-
-# Run E2E tests per domain
-go test -tags=e2e -count=1 -v ./test/e2e/scans/...
-
-# Run integration tests (requires PostgreSQL + RabbitMQ)
-go test -tags=integration -count=1 ./test/integration/...
-
-# Run benchmarks
-go test -bench=. -benchmem ./test/benchmarks/...
-
-# Short mode (skip integration-dependent subtests)
-go test -short ./...
-```
-
-### Code Quality
-
-```bash
-# Run go vet
 go vet ./...
-
-# Run linter (requires golangci-lint)
-golangci-lint run
-
-# Format code
-gofmt -w .
+go test ./... -count=1
 ```
 
-### Test Plan
+Reality check:
 
-Detailed TDD roadmap and gap analysis in [docs/features/](docs/features/):
-- **[tdd-plan.md](docs/features/tdd-plan.md)** — Full TDD plan with phase-by-phase status
-- **[test-gap-analysis.md](docs/features/test-gap-analysis.md)** — Gap analysis and remaining items
-- **[scan-features.md](docs/features/scan-features.md)** — Scan feature development plan
+- 10 test files carry `//go:build ignore` (119 test functions), including all
+  JWT, user-repository, and credential-handler tests. They are not run by
+  `go test ./...`.
+- `test/e2e` (tag `e2e`) does not compile against current constructors.
+- The PostgreSQL repositories have no running tests; API tests use in-memory
+  fakes.
+- No test ever contacts a real external target; everything is `httptest`.
 
-### Building
+## Schema migrations
 
-```bash
-# Build binary
-go build -o vulnscanner main.go
-
-# Build with version info
-go build -ldflags "-X main.Version=$(git describe --tags)" -o vulnscanner main.go
-```
-
-## Database Schema
-
-### ScanJob
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigint | Primary key |
-| `created_by` | bigint | User ID who created the scan |
-| `targets` | jsonb | Array of target URLs |
-| `template_selectors` | jsonb | Template filter criteria |
-| `status` | varchar | pending, running, completed, failed, cancelled |
-| `progress` | jsonb | ScanProgress (total, completed, failed, in_progress) |
-| `auth_credential_id` | bigint | FK to auth_credentials (nullable) |
-| `created_at` | timestamp | Creation time |
-| `updated_at` | timestamp | Last update time |
-
-### Finding
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigint | Primary key |
-| `scan_id` | bigint | FK to ScanJob (CASCADE delete) |
-| `target` | varchar | Scanned target |
-| `template_id` | varchar | Nuclei template ID |
-| `matched` | boolean | Whether vulnerability matched |
-| `severity` | varchar | info, low, medium, high, critical |
-| `details` | jsonb | Vulnerability details |
-| `created_at` | timestamp | Creation time |
-
-### AuthCredential
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigint | Primary key |
-| `user_id` | bigint | Owner user ID |
-| `name` | varchar | Credential display name |
-| `method` | varchar | login_form, cookie, bearer, api_key, selenium |
-| `config` | jsonb | Auth method-specific configuration |
-| `login_url` | varchar | Target login URL |
-| `verify_url` | varchar | Session verification URL |
-| `verify_pattern` | varchar | Expected content for verification |
-| `is_active` | boolean | Whether credential is usable |
-
-## RBAC Roles
-
-| Role | Permissions |
-|------|-------------|
-| **admin** | Full access to all resources |
-| **security_analyst** | Create scans, manage credentials, view results, manage tickets |
-| **auditor** | View-only access to scans, results, and credentials |
-| **viewer** | Limited view access |
-
-Extra permissions for credential vault:
-- `credential:create` — Create new auth credentials
-- `credential:read` — View credential metadata (secrets masked)
-- `credential:update` — Modify existing credentials
-- `credential:delete` — Remove credentials
-- `credential:verify` — Test credential against target
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Code Style
-
-This project follows the guidelines in [CODE_STYLE.md](CODE_STYLE.md). Please review it before submitting contributions.
+`AutoMigrate` runs on boot and is the only mechanism today. It cannot rename or
+drop columns, has no versions or rollback, and takes an `ACCESS EXCLUSIVE` lock.
+Two replicas booting together race on DDL. Versioned migrations
+(golang-migrate) are the next database task; `db/schema.sql` is stale and should
+not be used.
 
 ## Documentation
 
-- **[PLAN.md](PLAN.md)** — Milestone plan with progress tracking
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Comprehensive architecture overview
-- **[CODE_STYLE.md](CODE_STYLE.md)** — Code style guide
-- **[docs/features/scan-features.md](docs/features/scan-features.md)** — Scan feature development plan
-- **[GO-PROJECT-STRUCTURE-BEST-PRACTICES.md](GO-PROJECT-STRUCTURE-BEST-PRACTICES.md)** — DDD/Go project conventions
-- Swagger UI: `http://localhost:8080/api/docs/`
+| Document | Purpose |
+|---|---|
+| [docs/FEATURE-STATUS.md](docs/FEATURE-STATUS.md) | single source of truth for feature status |
+| [docs/BACKEND-DEV.md](docs/BACKEND-DEV.md) | development contract: env, endpoints, rules |
+| [CHANGELOG.md](CHANGELOG.md) | what changed, release by release |
+| [docs/api.md](docs/api.md) | **historical**, superseded by BACKEND-DEV |
+| [docs/prd.md](docs/prd.md), [docs/srs.md](docs/srs.md) | **historical requirements**, not normative |
+| [docs/architecture.md](docs/architecture.md) | **historical** design notes |
+| [docs/deployment.md](docs/deployment.md), [docs/testing.md](docs/testing.md) | partially stale; check BACKEND-DEV first |
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [ProjectDiscovery Nuclei](https://github.com/projectdiscovery/nuclei) — Vulnerability scanning engine
-- [Nuclei Templates](https://github.com/projectdiscovery/nuclei-templates) — Community-driven template library
-- [Tenable Web App Scanner](https://docs.tenable.com/web-app-scanning/) — Feature reference for DAST capabilities
-- [chromedp](https://github.com/chromedp/chromedp) — Headless Chrome for PDF generation
-
----
-
-**Built with ❤️ for cybersecurity professionals**
+MIT.

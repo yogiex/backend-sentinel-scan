@@ -75,7 +75,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, target string, plugin *Plugi
 	for k, v := range plugin.Headers {
 		req.Header.Set(k, v)
 	}
-	return e.do(req)
+	return e.do(req, plugin.NoRedirect)
 }
 
 func (e *HTTPExecutor) ExecuteBaseline(ctx context.Context, target string, plugin *Plugin) (*ExecutorResponse, error) {
@@ -118,17 +118,41 @@ func (e *HTTPExecutor) ExecuteBaseline(ctx context.Context, target string, plugi
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	return e.do(req)
+	return e.do(req, false)
+}
+
+// noRedirectClient returns a client that stops at the first redirect, keeping
+// the 3xx response and its Location header. The value is a shallow copy sharing
+// the original Transport, so the connection pool, SSRF guard, and egress budget
+// still apply.
+//
+// A non-*http.Client cannot be cloned, and is returned unchanged: the bundled
+// plugin that needs this always runs with a real client.
+func noRedirectClient(client HTTPClient) HTTPClient {
+	c, ok := client.(*http.Client)
+	if !ok {
+		return client
+	}
+	clone := *c
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &clone
 }
 
 // do sends req and reads at most MaxResponseBytes of the response body.
-func (e *HTTPExecutor) do(req *http.Request) (*ExecutorResponse, error) {
+func (e *HTTPExecutor) do(req *http.Request, noRedirect bool) (*ExecutorResponse, error) {
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", DefaultUserAgent)
 	}
 
+	client := e.client
+	if noRedirect {
+		client = noRedirectClient(client)
+	}
+
 	start := time.Now()
-	resp, err := e.client.Do(req)
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
 		return nil, err

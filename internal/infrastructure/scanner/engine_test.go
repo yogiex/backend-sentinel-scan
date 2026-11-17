@@ -141,3 +141,28 @@ func TestDetailsCarryEvidenceButNotTheBody(t *testing.T) {
 		t.Fatal("the full response body must never be persisted")
 	}
 }
+
+// An unreachable target must produce an error, not an empty "clean" result.
+// Otherwise the orchestrator counts the task as completed and the report claims
+// the host was checked.
+func TestExecuteReportsUnreachableTargetAsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := server.URL
+	server.Close()
+
+	engine := newTestEngine(t)
+	result := engine.Execute(context.Background(), Task{Target: url, TemplateID: "xss-reflected"})
+
+	if result.Error == nil {
+		t.Fatal("a target that never answered must not yield a clean result")
+	}
+	if !errors.Is(result.Error, ErrNoRequestCompleted) {
+		t.Fatalf("expected ErrNoRequestCompleted, got %v", result.Error)
+	}
+	if result.Checked {
+		t.Fatal("Checked must be false when no request completed")
+	}
+	if result.Finding.Matched {
+		t.Fatal("no match can be claimed without a response")
+	}
+}

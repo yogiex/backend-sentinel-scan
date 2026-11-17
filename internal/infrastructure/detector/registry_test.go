@@ -60,8 +60,8 @@ func TestEmbeddedPluginsAllValidate(t *testing.T) {
 	if err := reg.LoadEmbedded(); err != nil {
 		t.Fatalf("embedded plugins must all parse and validate: %v", err)
 	}
-	if reg.Len() != 9 {
-		t.Fatalf("expected 9 embedded plugins, got %d", reg.Len())
+	if reg.Len() != 7 {
+		t.Fatalf("expected 7 embedded plugins, got %d", reg.Len())
 	}
 	for _, p := range reg.List() {
 		if len(p.Payloads) == 0 {
@@ -84,7 +84,7 @@ func TestResolveSelectors(t *testing.T) {
 		return out
 	}
 
-	if got := ids(mustResolve(t, reg, "")); len(got) != 9 {
+	if got := ids(mustResolve(t, reg, "")); len(got) != 7 {
 		t.Fatalf("empty selector should mean all plugins, got %d", len(got))
 	}
 	if got := ids(mustResolve(t, reg, "xss-reflected")); len(got) != 1 || got[0] != "xss-reflected" {

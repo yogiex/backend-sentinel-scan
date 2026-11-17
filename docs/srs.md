@@ -1,4 +1,9 @@
-# SentinelScan Backend — Software Requirements Specification
+# Software Requirements (historical)
+
+> **Dokumen historis, tidak normatif.** Requirement di sini tidak semuanya
+> diimplementasikan; jangan jadikan dasar klaim ke pengguna. Status per fitur ada
+> di [FEATURE-STATUS.md](FEATURE-STATUS.md), kontrak yang berlaku di
+> [BACKEND-DEV.md](BACKEND-DEV.md).
 
 > **Version:** 1.0
 > **Status:** Draft

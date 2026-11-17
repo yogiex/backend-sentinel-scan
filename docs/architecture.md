@@ -1,4 +1,10 @@
-# SentinelScan Backend — Architecture
+# Architecture (historical)
+
+> **Dokumen historis.** Diagram dan komponen di sini menggambarkan rencana, bukan
+> kondisi sekarang: chromedp/RabbitMQ/autoscaler tidak aktif, engine headless
+> masih stub, dan PDF belum ada. Susunan paket yang sebenarnya ada di README dan
+> [BACKEND-DEV.md](BACKEND-DEV.md); status fitur di
+> [FEATURE-STATUS.md](FEATURE-STATUS.md).
 
 > **Pattern:** Domain-Driven Design (DDD) + Hexagonal Architecture
 > **Language:** Go 1.21+

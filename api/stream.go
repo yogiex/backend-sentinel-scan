@@ -187,15 +187,23 @@ func findingPayload(f *entity.Finding) map[string]any {
 
 func terminalEnvelope(scan *entity.ScanJob) streamEnvelope {
 	if scan.Status == entity.ScanStatusFailed || scan.Status == entity.ScanStatusCancelled {
+		// FailureReason is the stable code ("all_tasks_failed",
+		// "interrupted_by_restart"); falling back to the status keeps the frame
+		// useful for failures that carry no code.
+		reason := scan.FailureReason
+		if reason == "" {
+			reason = string(scan.Status)
+		}
 		return streamEnvelope{Type: string(event.EventTypeFailed), Data: map[string]any{
 			"scan_id": scan.ID,
 			"status":  scan.Status,
-			"reason":  string(scan.Status),
+			"reason":  reason,
 		}}
 	}
 	return streamEnvelope{Type: string(event.EventTypeComplete), Data: map[string]any{
 		"scan_id":   scan.ID,
 		"truncated": scan.Truncated,
+		"degraded":  scan.Degraded,
 	}}
 }
 

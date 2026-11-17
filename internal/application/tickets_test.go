@@ -188,6 +188,9 @@ func (r *ticketScanRepo) UpdateProgress(context.Context, uint, *entity.ScanProgr
 }
 func (r *ticketScanRepo) SetTruncated(context.Context, uint) error   { return nil }
 func (r *ticketScanRepo) TouchHeartbeat(context.Context, uint) error { return nil }
+func (r *ticketScanRepo) SetOutcome(context.Context, uint, bool, string) error {
+	return nil
+}
 func (r *ticketScanRepo) MarkInterrupted(context.Context, string, time.Time) (int64, error) {
 	return 0, nil
 }
@@ -229,6 +232,20 @@ func (r *ticketUserRepo) FindByUsername(context.Context, string) (*entity.User, 
 	return nil, apperr.ErrNotFound
 }
 func (r *ticketUserRepo) Update(context.Context, *entity.User) error { return nil }
+func (r *ticketUserRepo) IncrementTokenVersion(_ context.Context, id uint) (int, error) {
+	if u, ok := r.users[id]; ok {
+		u.TokenVersion++
+		return u.TokenVersion, nil
+	}
+	return 0, apperr.ErrNotFound
+}
+func (r *ticketUserRepo) UpdateLastLogin(_ context.Context, id uint, at time.Time) error {
+	if u, ok := r.users[id]; ok {
+		u.LastLogin = &at
+		return nil
+	}
+	return apperr.ErrNotFound
+}
 
 // ── harness ─────────────────────────────────────────────────
 

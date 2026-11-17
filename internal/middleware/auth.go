@@ -15,6 +15,7 @@ import (
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/entity"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/domain/policy"
 	"github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/internal/httpx"
+	apperr "github.com/inkubasi-btp-cybersecurity/vulnerability-scanner/pkg/errors"
 )
 
 const (
@@ -40,7 +41,24 @@ func WithActor(ctx context.Context, a policy.Actor) context.Context {
 // permission set is always re-derived from the role on the server.
 type Claims struct {
 	Role entity.Role `json:"role"`
+	// TokenVersion is copied from the user record at issue time. A mismatch with
+	// the database means the token was revoked.
+	TokenVersion int `json:"tv"`
 	jwt.RegisteredClaims
+}
+
+// UserState is the server-side truth about a principal at request time.
+type UserState struct {
+	Version int
+	Role    entity.Role
+	Active  bool
+}
+
+// UserStateProvider looks up the current state of a user. Require consults it
+// on every request when one is configured, which is what makes revocation and
+// role changes take effect immediately instead of at token expiry.
+type UserStateProvider interface {
+	AuthState(ctx context.Context, userID uint) (UserState, error)
 }
 
 // Auth issues and verifies HS256 access tokens.
@@ -48,6 +66,14 @@ type Auth struct {
 	key    []byte
 	ttl    time.Duration
 	parser *jwt.Parser
+	state  UserStateProvider
+}
+
+// WithUserState makes Require check the database on every request. Without it,
+// tokens cannot be revoked and a role change waits for expiry.
+func (a *Auth) WithUserState(p UserStateProvider) *Auth {
+	a.state = p
+	return a
 }
 
 // NewAuth validates the secret and builds the parser with hardened options.
@@ -75,7 +101,8 @@ func (a *Auth) Issue(u *entity.User) (string, time.Time, error) {
 	now := time.Now()
 	expires := now.Add(a.ttl)
 	claims := Claims{
-		Role: u.Role,
+		Role:         u.Role,
+		TokenVersion: u.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   strconv.FormatUint(uint64(u.ID), 10),
 			Issuer:    issuer,
@@ -120,6 +147,25 @@ func (a *Auth) Require(next http.Handler) http.Handler {
 			return
 		}
 		actor := policy.NewActor(uint(id), claims.Role)
+		if a.state != nil {
+			state, err := a.state.AuthState(r.Context(), uint(id))
+			switch {
+			case errors.Is(err, apperr.ErrNotFound):
+				httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or expired token")
+				return
+			case err != nil:
+				// Fail closed, but do not tell the caller their token is bad when
+				// the lookup itself is broken.
+				httpx.Error(w, http.StatusServiceUnavailable, "UNAVAILABLE", "Authentication lookup failed")
+				return
+			case !state.Active, state.Version != claims.TokenVersion:
+				httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or expired token")
+				return
+			}
+			// The database decides the role, not the token: a demotion must take
+			// effect now, not when the token expires.
+			actor = policy.NewActor(uint(id), state.Role)
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey{}, actor)))
 	})
 }

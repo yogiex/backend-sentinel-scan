@@ -161,6 +161,9 @@ func (s scanStore) UpdateProgress(context.Context, uint, *entity.ScanProgress) e
 }
 func (s scanStore) SetTruncated(context.Context, uint) error   { return nil }
 func (s scanStore) TouchHeartbeat(context.Context, uint) error { return nil }
+func (s scanStore) SetOutcome(context.Context, uint, bool, string) error {
+	return nil
+}
 func (s scanStore) MarkInterrupted(context.Context, string, time.Time) (int64, error) {
 	return 0, nil
 }
@@ -192,10 +195,29 @@ func (s userStore) FindByID(_ context.Context, id uint) (*entity.User, error) {
 	}
 	return nil, apperr.ErrNotFound
 }
-func (s userStore) FindByUsername(context.Context, string) (*entity.User, error) {
+func (s userStore) FindByUsername(_ context.Context, username string) (*entity.User, error) {
+	for _, u := range s.byID {
+		if u.Username == username {
+			return u, nil
+		}
+	}
 	return nil, apperr.ErrNotFound
 }
 func (s userStore) Update(context.Context, *entity.User) error { return nil }
+func (s userStore) IncrementTokenVersion(_ context.Context, id uint) (int, error) {
+	if u, ok := s.byID[id]; ok {
+		u.TokenVersion++
+		return u.TokenVersion, nil
+	}
+	return 0, apperr.ErrNotFound
+}
+func (s userStore) UpdateLastLogin(_ context.Context, id uint, at time.Time) error {
+	if u, ok := s.byID[id]; ok {
+		u.LastLogin = &at
+		return nil
+	}
+	return apperr.ErrNotFound
+}
 
 // ── harness ─────────────────────────────────────────────────
 

@@ -1,4 +1,10 @@
-# SentinelScan Backend — Product Requirements Document
+# Product Requirements (historical)
+
+> **Dokumen historis, tidak normatif.** Beberapa fitur yang dijanjikan di sini
+> (authenticated scanning, PDF report, headless engine, RabbitMQ, autoscaling)
+> belum ada. Status nyata per fitur ada di
+> [FEATURE-STATUS.md](FEATURE-STATUS.md); kontrak teknis di
+> [BACKEND-DEV.md](BACKEND-DEV.md).
 
 > **Product:** SentinelScan — DAST (Dynamic Application Security Testing) Engine
 > **Version:** 1.0 (MVP)

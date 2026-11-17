@@ -1,4 +1,11 @@
-# SentinelScan Backend — API Reference
+# API Reference (historical)
+
+> **Dokumen historis, bukan kontrak.** Sebagian isinya sudah tidak benar: format
+> error adalah `{"error":{"code":"...","message":"..."}}`, filter template memakai
+> `tag` (bukan `tags`), report export/download mengembalikan `501`, dan seluruh
+> endpoint tiket serta `POST /api/auth/logout` tidak tercatat di sini.
+> Kontrak yang berlaku ada di [BACKEND-DEV.md](BACKEND-DEV.md), status fitur di
+> [FEATURE-STATUS.md](FEATURE-STATUS.md).
 
 > **Base URL:** `http://localhost:8080`
 > **API Base:** `/api`

@@ -22,6 +22,9 @@ var (
 	ErrEngineNotConfigured    = errors.New("scanner: engine is not configured")
 	ErrUnknownTemplate        = errors.New("scanner: unknown template")
 	ErrHeadlessNotImplemented = errors.New("scanner: headless engine is not implemented")
+	// ErrNoRequestCompleted means the target never produced a response, so the
+	// plugin was not actually checked. It is an error, not a clean result.
+	ErrNoRequestCompleted = errors.New("scanner: no request produced a response")
 )
 
 type EngineConfig struct {
@@ -43,6 +46,9 @@ type Result struct {
 	// Truncated reports that the scan's request budget was exhausted while this
 	// task was running, so the report is partial by design.
 	Truncated bool
+	// Checked reports that at least one request reached the target. A task that
+	// was never checked cannot be counted as "no vulnerability found".
+	Checked bool
 }
 
 type Finding struct {
@@ -77,19 +83,26 @@ func (e *HTTPEngine) Execute(ctx context.Context, task Task) *Result {
 		return &Result{Error: fmt.Errorf("%w: %q", ErrUnknownTemplate, task.TemplateID)}
 	}
 
-	matches := e.detector.RunWithPlugins(ctx, task.Target, []*detector.Plugin{plugin})
+	checked := e.detector.CheckWithPlugins(ctx, task.Target, []*detector.Plugin{plugin})
 
 	result := &Result{
 		Finding: &Finding{
 			Target:     task.Target,
 			TemplateID: plugin.Metadata.ID,
-			Matched:    len(matches) > 0,
+			Matched:    len(checked.Matches) > 0,
 			Severity:   string(plugin.Metadata.Severity),
 		},
 		Truncated: budgetExhausted(ctx),
+		Checked:   checked.Stats.Checked(),
 	}
-	if len(matches) > 0 {
-		result.Finding.Details = buildDetails(plugin, matches[0])
+	if len(checked.Matches) > 0 {
+		result.Finding.Details = buildDetails(plugin, checked.Matches[0])
+	}
+	// Every request failed: the plugin was never really checked. Reporting that
+	// as a clean task is how a broken scan becomes a false "no findings" report.
+	if !result.Checked && checked.Stats.Failed > 0 {
+		result.Error = fmt.Errorf("%w after %d attempt(s): %v",
+			ErrNoRequestCompleted, checked.Stats.Attempted, checked.Stats.LastError)
 	}
 	return result
 }

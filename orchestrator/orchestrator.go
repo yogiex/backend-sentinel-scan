@@ -66,6 +66,10 @@ const (
 	// ReasonHeartbeatLost marks scans that stopped heartbeating while the process
 	// stayed alive (a wedged run, not a crash).
 	ReasonHeartbeatLost = "heartbeat_lost"
+	// ReasonAllTasksFailed marks scans where not one task produced a response.
+	// The target was never really checked, so calling it "completed" would
+	// report an unreachable host as a clean one.
+	ReasonAllTasksFailed = "all_tasks_failed"
 
 	defaultHeartbeatInterval = 15 * time.Second
 	// heartbeatGrace is how many missed beats are tolerated before a scan is
@@ -270,14 +274,28 @@ func (o *Orchestrator) discover(ctx context.Context, seeds []string, crawl *enti
 	if err != nil {
 		return seeds, false, err
 	}
-	return mergeTargets(seeds, o.validateDiscovered(ctx, result.DiscoveredURLs)), result.Truncated, nil
+	discovered := o.validateDiscovered(ctx, result.DiscoveredURLs, cfg.Link.Scope, seeds)
+	return mergeTargets(seeds, discovered), result.Truncated, nil
 }
 
-// validateDiscovered drops every discovered URL the SSRF policy rejects.
-func (o *Orchestrator) validateDiscovered(ctx context.Context, discovered []crawler.DiscoveredURL) []string {
+// validateDiscovered drops every discovered URL that leaves the authorised
+// scope or fails the SSRF policy.
+//
+// The scope check is deliberately repeated here, after the providers have
+// reported their results. A provider is free to be wrong — and one was: form
+// actions were reported before the scope check — so the merge point is the last
+// place where an out-of-scope URL can be stopped. SSRF only rejects internal
+// addresses, which says nothing about scanning somebody else's public host.
+func (o *Orchestrator) validateDiscovered(ctx context.Context, discovered []crawler.DiscoveredURL, scope crawler.ScopeRule, seeds []string) []string {
+	filter := crawler.NewScopeFilter(scope)
 	out := make([]string, 0, len(discovered))
+	dropped := 0
 	for _, d := range discovered {
 		raw := d.URL
+		if !filter.Allows(raw, seeds) {
+			dropped++
+			continue
+		}
 		if o.cfg.ValidateTarget != nil {
 			validated, err := o.cfg.ValidateTarget(ctx, raw)
 			if err != nil {
@@ -286,6 +304,9 @@ func (o *Orchestrator) validateDiscovered(ctx context.Context, discovered []craw
 			raw = validated
 		}
 		out = append(out, raw)
+	}
+	if dropped > 0 {
+		log.Printf("crawl: dropped %d discovered URL(s) outside the scan scope", dropped)
 	}
 	return out
 }
@@ -497,14 +518,38 @@ func (o *Orchestrator) record(result worker.Result) error {
 		if err := o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusCompleted); err != nil {
 			return err
 		}
-		o.publish(event.EventTypeComplete, result.ScanID, map[string]any{"truncated": true})
+		degraded := progress.Failed > 0
+		if err := o.cfg.ScanRepo.SetOutcome(ctx, result.ScanID, degraded, ""); err != nil {
+			return fmt.Errorf("record outcome: %w", err)
+		}
+		o.publish(event.EventTypeComplete, result.ScanID, map[string]any{"truncated": true, "degraded": degraded})
 		return nil
 	}
 	if allDone {
+		// Nothing was checked: every task failed before producing a response.
+		// "Completed" here would be a false clean report, so the scan fails.
+		if progress.Completed == 0 && progress.Failed > 0 {
+			if err := o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusFailed); err != nil {
+				return err
+			}
+			if err := o.cfg.ScanRepo.SetOutcome(ctx, result.ScanID, false, ReasonAllTasksFailed); err != nil {
+				return fmt.Errorf("record outcome: %w", err)
+			}
+			o.publish(event.EventTypeComplete, result.ScanID, map[string]any{
+				"truncated": false, "degraded": false, "status": string(entity.ScanStatusFailed),
+			})
+			return nil
+		}
 		if err := o.cfg.ScanRepo.UpdateStatus(ctx, result.ScanID, entity.ScanStatusCompleted); err != nil {
 			return err
 		}
-		o.publish(event.EventTypeComplete, result.ScanID, map[string]any{"truncated": false})
+		// Some targets never answered: the scan is complete but its coverage is
+		// partial, which the report has to say out loud.
+		degraded := progress.Failed > 0
+		if err := o.cfg.ScanRepo.SetOutcome(ctx, result.ScanID, degraded, ""); err != nil {
+			return fmt.Errorf("record outcome: %w", err)
+		}
+		o.publish(event.EventTypeComplete, result.ScanID, map[string]any{"truncated": false, "degraded": degraded})
 	}
 	return nil
 }

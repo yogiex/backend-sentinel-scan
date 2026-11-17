@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -54,11 +55,11 @@ func TestRequireRejectsBadTokens(t *testing.T) {
 	valid, _, _ := auth.Issue(&entity.User{ID: 1, Role: entity.RoleAdmin})
 
 	cases := map[string]string{
-		"missing":    "",
-		"no bearer":  valid,
-		"garbage":    "Bearer not-a-token",
-		"tampered":   "Bearer " + valid + "x",
-		"wrong alg":  "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIn0.",
+		"missing":   "",
+		"no bearer": valid,
+		"garbage":   "Bearer not-a-token",
+		"tampered":  "Bearer " + valid + "x",
+		"wrong alg": "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxIn0.",
 	}
 	for name, header := range cases {
 		req := httptest.NewRequest(http.MethodGet, "/api/scans", nil)
@@ -108,5 +109,75 @@ func TestCORSAllowlist(t *testing.T) {
 		if rec.Header().Get("Access-Control-Allow-Origin") != "" {
 			t.Errorf("origin %q must not receive ACAO", origin)
 		}
+	}
+}
+
+// staticState is a UserStateProvider backed by a single known answer.
+type staticState struct {
+	state UserState
+	err   error
+}
+
+func (s staticState) AuthState(context.Context, uint) (UserState, error) {
+	return s.state, s.err
+}
+
+func TestRequireUsesDatabaseRole(t *testing.T) {
+	auth, _ := NewAuth("0123456789abcdef0123456789abcdef", time.Minute)
+	// The token claims admin; the database says the user was demoted. The
+	// database must win, otherwise a demotion waits for the token to expire.
+	token, _, _ := auth.Issue(&entity.User{ID: 7, Role: entity.RoleAdmin})
+	auth.WithUserState(staticState{state: UserState{Version: 0, Role: entity.RoleViewer, Active: true}})
+
+	var role entity.Role
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a, _ := ActorFrom(r.Context())
+		role = a.Role
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tickets", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	auth.Require(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if role != entity.RoleViewer {
+		t.Fatalf("role = %q, want viewer from the database", role)
+	}
+}
+
+func TestRequireRejectsRevokedTokenVersion(t *testing.T) {
+	auth, _ := NewAuth("0123456789abcdef0123456789abcdef", time.Minute)
+	token, _, _ := auth.Issue(&entity.User{ID: 7, Role: entity.RoleViewer, TokenVersion: 2})
+	auth.WithUserState(staticState{state: UserState{Version: 3, Role: entity.RoleViewer, Active: true}})
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("revoked token must not reach the handler")
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/tickets", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	auth.Require(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestRequireRejectsInactiveUser(t *testing.T) {
+	auth, _ := NewAuth("0123456789abcdef0123456789abcdef", time.Minute)
+	token, _, _ := auth.Issue(&entity.User{ID: 7, Role: entity.RoleViewer})
+	auth.WithUserState(staticState{state: UserState{Role: entity.RoleViewer, Active: false}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tickets", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	auth.Require(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }

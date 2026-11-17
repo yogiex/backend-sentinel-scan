@@ -1,24 +1,31 @@
 package detector
 
 import (
+	"net/http"
 	"regexp"
 	"strings"
 )
 
 func MatchResponse(body string, statusCode int, matcher MatcherConfig, payload string) MatchResult {
-	return matchResponse(body, statusCode, matcher, payload, nil)
+	return matchResponse(body, statusCode, nil, matcher, payload, nil)
+}
+
+// MatchResponseWithHeaders is the form the engine uses: it carries the response
+// headers so a matcher can read Location or any other header.
+func MatchResponseWithHeaders(body string, statusCode int, headers http.Header, matcher MatcherConfig, payload string) MatchResult {
+	return matchResponse(body, statusCode, headers, matcher, payload, nil)
 }
 
 func MatchResponseWithBaseline(body string, statusCode int, matcher MatcherConfig, payload string, baseline *ExecutorResponse) MatchResult {
-	return matchResponse(body, statusCode, matcher, payload, baseline)
+	return matchResponse(body, statusCode, nil, matcher, payload, baseline)
 }
 
-func matchResponse(body string, statusCode int, matcher MatcherConfig, payload string, baseline *ExecutorResponse) MatchResult {
+func matchResponse(body string, statusCode int, headers http.Header, matcher MatcherConfig, payload string, baseline *ExecutorResponse) MatchResult {
 	switch matcher.Type {
 	case MatcherKeyword:
-		return matchKeyword(body, statusCode, matcher, payload)
+		return matchKeyword(matcherContent(body, headers, matcher), statusCode, matcher, payload)
 	case MatcherRegex:
-		return matchRegex(body, statusCode, matcher, payload)
+		return matchRegex(matcherContent(body, headers, matcher), statusCode, matcher, payload)
 	case MatcherStatus:
 		return matchStatus(body, statusCode, matcher, payload)
 	case MatcherErrorBased:
@@ -30,6 +37,19 @@ func matchResponse(body string, statusCode int, matcher MatcherConfig, payload s
 	default:
 		return MatchResult{Matched: false}
 	}
+}
+
+// matcherContent selects what a content matcher is allowed to read. Keyword and
+// regex matchers used to read the body no matter what "location" said, so a
+// header check silently inspected the wrong data and could never fire.
+func matcherContent(body string, headers http.Header, matcher MatcherConfig) string {
+	if matcher.Location != MatcherLocationHeader {
+		return body
+	}
+	if headers == nil || matcher.HeaderName == "" {
+		return ""
+	}
+	return strings.Join(headers.Values(matcher.HeaderName), "\n")
 }
 
 func matchKeyword(body string, statusCode int, matcher MatcherConfig, payload string) MatchResult {

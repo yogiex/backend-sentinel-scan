@@ -18,6 +18,11 @@ type ScanRepository interface {
 	UpdateProgress(ctx context.Context, id uint, progress *entity.ScanProgress) error
 	// SetTruncated records that the scan stopped at its request budget.
 	SetTruncated(ctx context.Context, id uint) error
+	// SetOutcome records how complete a finished scan was: degraded marks a
+	// scan whose tasks did not all produce a response, and failureReason is the
+	// stable code for an abnormal end (empty for a normal one). Status is not
+	// touched here; UpdateStatus owns the state machine.
+	SetOutcome(ctx context.Context, id uint, degraded bool, failureReason string) error
 	// TouchHeartbeat records that the process that owns the scan is still alive.
 	TouchHeartbeat(ctx context.Context, id uint) error
 	// MarkInterrupted fails every scan that is still in a non-terminal state,
@@ -82,6 +87,13 @@ type UserRepository interface {
 	FindByID(ctx context.Context, id uint) (*entity.User, error)
 	FindByUsername(ctx context.Context, username string) (*entity.User, error)
 	Update(ctx context.Context, user *entity.User) error
+	// IncrementTokenVersion bumps the revocation counter and returns the new
+	// value. It must be atomic: a read-modify-write would lose a concurrent
+	// logout and leave a token alive.
+	IncrementTokenVersion(ctx context.Context, id uint) (int, error)
+	// UpdateLastLogin touches only last_login. Writing the whole row here lets a
+	// login that is in flight overwrite a role change or a deactivation.
+	UpdateLastLogin(ctx context.Context, id uint, at time.Time) error
 }
 
 type AuditLogRepository interface {

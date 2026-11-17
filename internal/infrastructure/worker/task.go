@@ -29,5 +29,8 @@ type Result struct {
 	// Truncated reports that the scan ran out of request budget; the report is
 	// partial on purpose and must say so.
 	Truncated bool
-	Error     error
+	// Checked reports that at least one request reached the target. A task that
+	// was never checked must not be counted as a clean "nothing found".
+	Checked bool
+	Error   error
 }

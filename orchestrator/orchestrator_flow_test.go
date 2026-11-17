@@ -22,13 +22,15 @@ type interruptCall struct {
 }
 
 type fakeScanRepo struct {
-	mu         sync.Mutex
-	status     entity.ScanStatus
-	progress   entity.ScanProgress
-	truncated  bool
-	updates    int
-	heartbeats int
-	interrupts []interruptCall
+	mu            sync.Mutex
+	status        entity.ScanStatus
+	progress      entity.ScanProgress
+	truncated     bool
+	degraded      bool
+	failureReason string
+	updates       int
+	heartbeats    int
+	interrupts    []interruptCall
 }
 
 func (f *fakeScanRepo) Create(context.Context, *entity.ScanJob) error { return nil }
@@ -55,6 +57,13 @@ func (f *fakeScanRepo) SetTruncated(context.Context, uint) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.truncated = true
+	return nil
+}
+func (f *fakeScanRepo) SetOutcome(_ context.Context, _ uint, degraded bool, failureReason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.degraded = degraded
+	f.failureReason = failureReason
 	return nil
 }
 func (f *fakeScanRepo) TouchHeartbeat(context.Context, uint) error {
@@ -86,6 +95,13 @@ func (f *fakeScanRepo) snapshot() (entity.ScanStatus, entity.ScanProgress, bool)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.status, f.progress, f.truncated
+}
+
+// outcomeSnapshot reports what the orchestrator recorded about completeness.
+func (f *fakeScanRepo) outcomeSnapshot() (bool, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.degraded, f.failureReason
 }
 
 type fakeFindingRepo struct {
